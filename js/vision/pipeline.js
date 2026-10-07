@@ -5,7 +5,7 @@
 // returning RGBA pixels of the source rectangle scaled to dw x dh. In the
 // browser this is canvas.drawImage(); in Node it is sampler.js.
 
-import { locateDisplay, readDigits, validateReading } from './sevenseg.js';
+import { locateDisplay, readDigits, validateReading, expectedDigits } from './sevenseg.js';
 
 export const PIPE_DEFAULTS = {
   searchW: 400,        // width of the downscaled search image
@@ -56,7 +56,12 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
     if (cw * rs > c.maxReadW) rs = c.maxReadW / cw;
     const rw = Math.max(8, Math.round(cw * rs)), rh = Math.max(8, Math.round(ch * rs));
     const img2 = sample(x0, y0, cw, ch, rw, rh);
-    const r = readDigits(img2, rw, rh, { colorMode: mode, strictness: c.strictness, keepMask: c.keepDebug });
+    const expect = c.expectDigits ?? expectedDigits(c.minKg, c.maxKg, c.multiplier || 1);
+    // "bright" mode also sees glare and unlit segments, so demand clearer digits there
+    const r = readDigits(img2, rw, rh, {
+      colorMode: mode, strictness: c.strictness, keepMask: c.keepDebug, expectDigits: expect,
+      ...(mode === 'bright' ? { minMargin: 0.8, maxCost: 1.3 } : {}),
+    });
     const sx = cw / rw, sy = ch / rh;
     const map = (q) => (q ? q.map(([x, y]) => [x0 + x * sx, y0 + y * sy]) : null);
     const located = { x: bx, y: by, w: bw, h: bh, edge: cand.touchesEdge };

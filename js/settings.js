@@ -24,7 +24,7 @@ export const DEFAULTS = {
   autoStop: true,
   stallSec: 120,
   lostSec: 45,
-  startMinRiseKg: 120,
+  startMinRiseKg: 80,
   // filter
   rateVar: 100,
   warmupSec: 12,

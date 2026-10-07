@@ -4,7 +4,7 @@ import { loadSettings, saveSettings, resetSettings, SCHEMA, engineConfig, reader
 import { TapEngine } from './analysis/engine.js';
 import { analyseSession } from './analysis/offline.js';
 import { TapSimulator } from './analysis/sim.js';
-import { renderDisplay } from './vision/render7seg.js';
+import { renderDisplay, mulberry32 } from './vision/render7seg.js';
 import { Camera, WakeLock } from './camera.js';
 import { BrowserReader } from './reader.js';
 import { Store } from './store.js';
@@ -111,9 +111,11 @@ function viewRect() {
 function applyView() {
   const v = viewRect();
   const el = app.el;
-  el.style.width = `${v.sw * v.s}px`;
-  el.style.height = `${v.sh * v.s}px`;
-  el.style.transform = `translate(${-v.x * v.s}px, ${-v.y * v.s}px)`;
+  // element sized to the "cover" fit; zoom is a compositor-only scale (no huge layers on iOS)
+  const s0 = v.s / app.view.z;
+  el.style.width = `${v.sw * s0}px`;
+  el.style.height = `${v.sh * s0}px`;
+  el.style.transform = `translate(${-v.x * v.s}px, ${-v.y * v.s}px) scale(${app.view.z})`;
 }
 
 let hwTimer = null;
@@ -180,6 +182,7 @@ function setupGestures() {
   camBox.addEventListener('pointercancel', up);
   $('zoom').addEventListener('input', (e) => setZoom(+e.target.value));
   window.addEventListener('resize', () => { applyView(); app.lastChart = 0; });
+  video.addEventListener('resize', () => applyView()); // intrinsic size changed (rotation, lens switch)
 }
 
 // ------------------------------------------------------------ sources --
@@ -337,16 +340,17 @@ async function runVideo() {
 
 // --- demo ---
 
-function startDemo(speed) {
+function startDemo(speed, fixedSeed = 0) {
   beeper.unlock();
   stopSources({ keepUi: true }).then(() => {
-    const seed = 1 + Math.floor(Math.random() * 100000);
-    const twoPots = Math.random() < 0.35;
+    const seed = fixedSeed || 1 + Math.floor(Math.random() * 100000);
+    const rand = mulberry32(seed * 13 + 1);
+    const twoPots = rand() < 0.35;
     const sim = new TapSimulator({
       seed,
-      rate0: 800 + Math.random() * 500,
-      rateEnd: 520 + Math.random() * 200,
-      taps: twoPots ? [{ mass: 3600 }, { mass: 3200 + Math.random() * 600, rate0: 650 + Math.random() * 300 }] : null,
+      rate0: 800 + rand() * 500,
+      rateEnd: 520 + rand() * 200,
+      taps: twoPots ? [{ mass: 3600 }, { mass: 3200 + rand() * 600, rate0: 650 + rand() * 300 }] : null,
       gapSec: 50,
     });
     app.source = 'demo';
@@ -616,12 +620,13 @@ function renderMain(snap) {
       if (snap.signal === 'none') { state = 'nosignal'; arrow = '?'; label = 'Display lost — re-aim'; }
       else if (m.status === 'noflow') { state = 'noflow'; arrow = '‖'; label = S.segCount ? 'No flow' : 'Waiting for flow'; rate = '—'; }
       else if (m.status === 'measuring') { state = 'measuring'; arrow = '…'; label = 'Measuring…'; }
+      else if (m.status === 'stopping') { state = 'measuring'; arrow = '↘'; label = 'Flow dropping…'; }
       else if (m.status === 'fast') { state = 'fast'; arrow = ARROW.fast; label = 'Too fast — slow down'; }
       else if (m.status === 'slow') { state = 'slow'; arrow = ARROW.slow; label = 'Too slow — speed up'; }
       else if (m.status === 'ok') { state = 'ok'; arrow = ARROW.ok; label = 'On target'; }
       if (['fast', 'slow', 'ok'].includes(state)) {
         certain = m.certain ? '1' : '0';
-        sub = `±${fmtInt(m.ci)} (90%) · target ${tgt} ±${tol}%${m.certain ? '' : ' · not yet certain'}`;
+        sub = m.certain ? `±${fmtInt(m.ci)} (90%) · target ${tgt} ±${tol}%` : `±${fmtInt(m.ci)} (90%) · not yet certain`;
       } else if (state === 'measuring' && m.ci != null) sub = `±${fmtInt(m.ci)} (90%) · settling`;
     }
   }
@@ -1057,7 +1062,7 @@ async function snapshotFrame() {
 
 function wire() {
   for (const b of document.querySelectorAll('.tab')) b.addEventListener('click', () => showView(b.dataset.view));
-  $('btnCamera').addEventListener('click', startCamera);
+  $('btnCamera').addEventListener('click', () => { beeper.unlock(); wake.request(); startCamera(); });
   $('btnPower').addEventListener('click', () => { stopSources(); toast('Camera stopped'); });
   $('btnStartStop').addEventListener('click', () => {
     beeper.unlock();
@@ -1174,7 +1179,7 @@ async function init() {
     navigator.serviceWorker.register('sw.js').catch((e) => console.warn('SW', e));
   }
   const p = new URLSearchParams(location.search);
-  if (p.has('demo')) startDemo(+p.get('demo') || 5);
+  if (p.has('demo')) startDemo(+p.get('demo') || 5, +p.get('seed') || 0);
   window.__tapRate = { app, settings: () => settings, store }; // for debugging / automated tests
 }
 

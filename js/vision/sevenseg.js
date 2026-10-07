@@ -53,7 +53,8 @@ export const READ_DEFAULTS = {
   maxShear: 0.5,
   minDigitH: 8,
   maxCost: 1.7,
-  minMargin: 0.45,
+  minMargin: 0.6,
+  expectDigits: 0,     // digits the display must show (0 = unknown); guides segmentation
   keepMask: false,
 };
 
@@ -375,11 +376,13 @@ export function readDigits(rgba, w, h, opts = {}) {
     g.h = g.vmax - g.vmin + 1;
     g.mass = g.cnt * stride;
     g.isGlyph = g.h >= 0.5 * H && g.mass >= 0.012 * H * H;
-    let up = 0, lo = 0;
-    for (let r = 1; r <= half; r++) up += rows[r];
-    for (let r = half + 1; r < rowsN - 1; r++) lo += rows[r];
-    g.cu = up / Math.max(1, half);
-    g.cl = lo / Math.max(1, rowsN - 2 - half);
+    // longest continuous vertical stroke in the upper and lower half (a "1" has one in each)
+    let run = 0, best = 0;
+    for (let r = 1; r <= half; r++) { run = rows[r] ? run + 1 : 0; if (run > best) best = run; }
+    g.cu = best / Math.max(1, half);
+    run = 0; best = 0;
+    for (let r = half + 1; r < rowsN - 1; r++) { run = rows[r] ? run + 1 : 0; if (run > best) best = run; }
+    g.cl = best / Math.max(1, rowsN - 2 - half);
     g.extent = g.h / H;
     const seg = new Float64Array(7);
     for (let j = a; j < b; j++) {
@@ -416,7 +419,7 @@ export function readDigits(rgba, w, h, opts = {}) {
     g.narrow = g.w < 0.6 * Wt && g.w < 0.36 * H;
     if (g.narrow) {
       // a "1" is two vertical segments: both halves present and (nearly) full height
-      const ok = g.cu >= 0.35 && g.cl >= 0.35 && g.extent >= 0.6;
+      const ok = g.cu >= 0.45 && g.cl >= 0.45 && g.extent >= 0.6;
       g.ch = '1';
       g.cost = ok ? 0.3 * (2 - g.cu - g.cl) : 3;
       g.margin = ok ? 1 : 0;
@@ -438,69 +441,153 @@ export function readDigits(rgba, w, h, opts = {}) {
     }
     g.ch = bestCh; g.cost = best; g.margin = second - best; g.nv = nv;
     g.conf = Math.max(0, Math.min(1, g.margin / 1.5));
-    g.good = best <= o.maxCost && g.margin >= o.minMargin;
+    // segments should be clearly on or off; two or more half-lit ones = ambiguous digit
+    let halfLit = 0;
+    for (let q = 0; q < 7; q++) if (nv[q] > 0.35 && nv[q] < 0.65) halfLit++;
+    g.good = best <= o.maxCost && g.margin >= o.minMargin && halfLit < 2 && bestCh !== '1'; // a real "1" is narrow
+    // every digit cell on a display has the same width (only "1" is narrow), so a
+    // piece much wider/narrower than the typical digit is not one digit
+    const wr = g.w / Wt;
+    if (wr > 1.3 || wr < 0.7) { g.good = false; g.cost += 3; }
+    else if (wr > 1.18 || wr < 0.8) g.cost += 0.8;
     return g;
   };
 
-  // Runs too wide for one digit (neighbours bridged by glow/noise, typically a narrow
-  // "1" glued to the next digit) are split by recognition: try the lowest-count
-  // columns as cut points and keep the segmentation whose pieces read best.
-  const pieceCost = (parts) => {
-    let c = 0;
-    for (const p of parts) {
-      if (!p.cnt) continue;
-      if (p.isGlyph) c += classify(p).cost + (p.good ? 0 : 2);
-      else if (p.mass >= 0.01 * H * H) c += 2; // discarding a sizeable piece is suspicious
-    }
-    return c;
+  // Runs wider than one digit (neighbours bridged by glow/noise, typically a narrow
+  // "1" glued to the next digit, or an indicator LED glued to a digit) may need
+  // splitting. Segmentation by recognition: for every run, enumerate cut points at
+  // column-count minima and score each resulting set of pieces by how well they
+  // read. Then pick, over all runs together, the combination whose digit count
+  // equals the count the display must show (from the plausible range) at the
+  // lowest total cost. Without a known count, each extra digit costs a penalty so a
+  // clean "0" is never read as "11". Dot-sized leftovers (indicator LEDs, decimal
+  // points) are cheap to discard; larger leftovers are not.
+  const SPLIT_PENALTY = 0.8, DOT = 0.02 * H * H, MAXK = 4;
+  const trigger = Math.max(0.62 * H, 1.12 * Wt);
+  const memo = new Map();
+  const leafCost = (g) => {
+    if (!g.cnt) return { k: 0, cost: 0 };
+    if (g.isGlyph) { classify(g); return { k: 1, cost: g.cost + (g.good ? 0 : 2) }; }
+    // a dot at the bottom is a decimal point (cheap); one higher up may be a cut-off bar
+    return { k: 0, cost: g.mass >= DOT ? 2 : (g.vmin + g.vmax) / 2 > top + 0.6 * H ? 0.3 : 1 };
   };
-  const splitBest = (c0, c1, depth) => {
+  // options(c0, c1) -> Map(k -> {cost, parts}): best way to read columns c0..c1 as k glyphs
+  const options = (c0, c1, depth) => {
+    const key = c0 * 65536 + c1;
+    if (memo.has(key)) return memo.get(key);
+    const out = new Map();
     const g = measure(c0, c1);
+    const lc = leafCost(g);
+    out.set(lc.k, { cost: lc.cost, parts: [g] });
     const wid = c1 - c0 + 1;
-    if (wid <= limit || wid < 6 || depth > 3) return [g];
-    const lo = c0 + Math.max(1, Math.floor(0.12 * wid)), hi = c1 - Math.max(1, Math.floor(0.12 * wid));
-    const minima = [];
-    for (let col = lo; col <= hi; col++) {
-      const cv = colHist[col];
-      if (cv <= colHist[col - 1] && cv <= colHist[col + 1]) minima.push(col);
+    if (wid > trigger && wid >= 6 && depth <= 3) {
+      const lo = c0 + Math.max(1, Math.floor(0.12 * wid)), hi = c1 - Math.max(1, Math.floor(0.12 * wid));
+      const minima = [];
+      for (let col = lo; col <= hi; col++) {
+        const cv = colHist[col];
+        if (cv <= colHist[col - 1] && cv <= colHist[col + 1]) minima.push(col);
+      }
+      minima.sort((a, b) => colHist[a] - colHist[b]);
+      const cuts = [];
+      for (const m of minima) {
+        if (cuts.every((x) => Math.abs(x - m) > 2)) cuts.push(m);
+        if (cuts.length >= 4) break;
+      }
+      for (const cut of cuts) {
+        const cutCost = (colHist[cut] / Math.max(1, (0.1 * H) / stride)) * 0.2;
+        const L = options(c0, cut - 1, depth + 1), R = options(cut + 1, c1, depth + 1);
+        for (const [kl, a] of L) {
+          for (const [kr, b] of R) {
+            const k = kl + kr;
+            if (k > MAXK) continue;
+            const cost = a.cost + b.cost + cutCost;
+            if (!out.has(k) || cost < out.get(k).cost) out.set(k, { cost, parts: [...a.parts, ...b.parts] });
+          }
+        }
+      }
     }
-    minima.sort((a, b) => colHist[a] - colHist[b]);
-    const cuts = [];
-    for (const m of minima) {
-      if (cuts.every((x) => Math.abs(x - m) > 2)) cuts.push(m);
-      if (cuts.length >= 4) break;
-    }
-    if (!cuts.length) return [g];
-    let bestParts = null, bestCost = Infinity;
-    for (const cut of cuts) {
-      const parts = [...splitBest(c0, cut - 1, depth + 1), ...splitBest(cut + 1, c1, depth + 1)];
-      const cost = pieceCost(parts) + colHist[cut] / Math.max(1, 0.1 * H / stride) * 0.2;
-      if (cost < bestCost) { bestCost = cost; bestParts = parts; }
-    }
-    return bestParts;
+    memo.set(key, out);
+    return out;
   };
-  const pieces = [];
-  for (const g of G) {
-    if (g.w > limit) pieces.push(...splitBest(g.c0, g.c1, 0));
-    else pieces.push(g);
+  const runOpts = G.map((g) => options(g.c0, g.c1, 0));
+  // dynamic programme over runs: best[k] = cheapest way to obtain k glyphs so far
+  let best = new Map([[0, { cost: 0, parts: [] }]]);
+  for (const opts of runOpts) {
+    const next = new Map();
+    for (const [k0, a] of best) {
+      for (const [k1, b] of opts) {
+        const k = k0 + k1;
+        const cost = a.cost + b.cost;
+        if (!next.has(k) || cost < next.get(k).cost) next.set(k, { cost, parts: [...a.parts, ...b.parts] });
+      }
+    }
+    best = next;
   }
+  const baseK = runOpts.reduce((a, op) => a + Math.min(...op.keys()), 0);
+  let choice = null;
+  if (o.expectDigits && best.has(o.expectDigits)) choice = best.get(o.expectDigits);
+  else {
+    let bc = Infinity;
+    for (const [k, val] of best) {
+      const c = val.cost + SPLIT_PENALTY * Math.max(0, k - Math.max(1, baseK)) + (k === 0 ? 100 : 0);
+      if (c < bc) { bc = c; choice = val; }
+    }
+  }
+  const pieces = choice ? choice.parts : G;
   const glyphs = pieces.filter((g) => g.cnt && g.isGlyph).sort((a, b) => a.umin - b.umin);
   for (const g of pieces) if (g.cnt && !g.isGlyph) res.extras.push({ u0: g.umin, u1: g.umax, v0: g.vmin, v1: g.vmax, mass: g.mass });
   if (!glyphs.length) return fail('no-glyphs');
   for (const g of glyphs) {
     if (g.xmin <= 1 || g.xmax >= w - 2 || g.ymin <= 0 || g.ymax >= h - 1) return fail('edge');
   }
-  // A sizeable fragment in the upper part of the row, among the digits, means the
+  // A sizeable fragment in the upper part of the row, between the digits, means the
   // segmentation went wrong (e.g. the top bar of a "7" cut off, leaving a "1").
-  const spanL = glyphs[0].umin - 0.15 * H, spanR = glyphs[glyphs.length - 1].umax + 0.15 * H;
+  // Dot-sized blobs (indicator LEDs, decimal points, colons) are allowed.
+  const spanL = glyphs[0].umin, spanR = glyphs[glyphs.length - 1].umax;
   for (const e of res.extras) {
     const vc = (e.v0 + e.v1) / 2;
-    if (e.mass >= 0.01 * H * H && vc < top + 0.6 * H && e.u1 >= spanL && e.u0 <= spanR) return fail('fragment');
+    if (e.mass >= DOT && vc < top + 0.6 * H && e.u1 > spanL && e.u0 < spanR) return fail('fragment');
+  }
+
+  // A "1" with a bar-shaped stub butting onto its upper left is really a "7" whose
+  // top bar was cut off: refuse rather than guess. More generally a "1" occupies the
+  // right of its digit cell and the rest of that cell must be dark; lit pixels there
+  // mean the "1" is the right half of another digit (e.g. a blurred "3").
+  for (const g of glyphs) {
+    classify(g);
+    if (!g.narrow) continue;
+    const cellL = g.umax + 1 - 0.95 * Wt;
+    for (const e of res.extras) {
+      const uc = (e.u0 + e.u1) / 2, vc = (e.v0 + e.v1) / 2;
+      if (uc >= cellL && uc < g.umin && vc < top + 0.45 * H && e.mass >= 0.01 * H * H) return fail('1-not-alone');
+    }
+    const c0 = Math.max(0, Math.round(g.umax + 1 - 0.85 * Wt - umin)), c1 = Math.round(g.umin - umin) - 2;
+    let lit = 0;
+    for (let col = c0; col <= c1; col++) lit += colHist[col];
+    if (lit * stride > 0.04 * H * H) return fail('1-not-alone');
+    for (const e of res.extras) {
+      const vc = (e.v0 + e.v1) / 2, ew = e.u1 - e.u0 + 1, eh = e.v1 - e.v0 + 1;
+      if (vc < top + 0.4 * H && e.u1 <= g.umin + 1 && e.u1 >= g.umin - 0.25 * Wt && ew >= 0.8 * eh) return fail('fragment-1');
+    }
+  }
+
+  // Digits sit on a fixed pitch and are right-aligned in their cells ("1" included),
+  // so the right edges must be evenly spaced. An irregular set means the row was
+  // cut into the wrong pieces.
+  if (glyphs.length >= 3) {
+    const n = glyphs.length, R = glyphs.map((g) => g.umax);
+    const im = (n - 1) / 2, rm = R.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0;
+    for (let i = 0; i < n; i++) { sxy += (i - im) * (R[i] - rm); sxx += (i - im) ** 2; }
+    const P = sxy / sxx;
+    let worst = 0;
+    for (let i = 0; i < n; i++) worst = Math.max(worst, Math.abs(R[i] - (rm + P * (i - im))));
+    res.pitch = P / H;
+    if (P < 0.55 * H || P > 1.4 * H || worst > Math.max(2, 0.14 * P)) return fail('pitch');
   }
 
   let text = '', minConf = 1;
   for (const g of glyphs) {
-    classify(g);
     const quad = [toOrig(g.umin, top), toOrig(g.umax + 1, top), toOrig(g.umax + 1, bottom), toOrig(g.umin, bottom)];
     const d = { ch: g.ch, conf: g.conf, cost: g.cost, margin: g.margin, quad };
     if (g.narrow) Object.assign(d, { cover: [+g.cu.toFixed(2), +g.cl.toFixed(2)], wid: +(g.w / H).toFixed(2), extent: +g.extent.toFixed(2) });

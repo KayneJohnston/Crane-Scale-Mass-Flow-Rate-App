@@ -51,6 +51,26 @@ test('random harsh scenes: high read rate and no wrong values', () => {
   assert.ok(ok / N >= 0.9, `read rate ${ok}/${N}`);
 });
 
+test('ignores indicator LEDs and decimal points next to the digits', () => {
+  const W = 640, H = 360;
+  const leds = [
+    (g) => [{ x: g.cx + g.totalW / 2 + 6, y: g.cy - 18, r: 3.5, color: [255, 40, 30] }],
+    (g) => [{ x: g.cx + g.totalW / 2 + 14, y: g.cy, r: 4, color: [255, 40, 30] }],
+    (g) => [{ x: g.cx - g.totalW / 2 - 10, y: g.cy - 18, r: 4, color: [255, 40, 30] }],
+  ];
+  for (const led of leds) {
+    const buf = new Uint8ClampedArray(W * H * 4);
+    const g = renderDisplay(buf, W, H, { text: '20050', digitH: 50, slantDeg: 6 });
+    renderDisplay(buf, W, H, { text: '20050', digitH: 50, slantDeg: 6, clutter: led(g) });
+    const r = readFrame(makeSampler(buf, W, H), W, H, { x: 0, y: 0, w: W, h: H });
+    assert.equal(r.value, 20050, r.reason);
+  }
+  const buf = new Uint8ClampedArray(W * H * 4);
+  renderDisplay(buf, W, H, { text: '2005', digitH: 50, dp: 1 }); // "20.05" tonnes
+  const r = readFrame(makeSampler(buf, W, H), W, H, { x: 0, y: 0, w: W, h: H }, { multiplier: 10 });
+  assert.equal(r.value, 20050, r.reason);
+});
+
 test('rejects a display that is cut off by the frame edge', () => {
   const { buf, W, H } = scene('20050', { cx: 20, digitH: 60 });
   const r = readFrame(makeSampler(buf, W, H), W, H, { x: 0, y: 0, w: W, h: H });

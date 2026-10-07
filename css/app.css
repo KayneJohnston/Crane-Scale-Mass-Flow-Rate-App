@@ -64,7 +64,7 @@ main { flex: 1; min-height: 0; overflow: hidden; position: relative; }
   border-radius: var(--radius); overflow: hidden; background: #000; touch-action: none;
 }
 .cam-box video, .cam-box #simCanvas {
-  position: absolute; left: 0; top: 0; transform-origin: 0 0; max-width: none; display: block;
+  position: absolute; left: 0; top: 0; transform-origin: 0 0; max-width: none; display: block; will-change: transform;
 }
 .cam-box #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
 .reading-badge {

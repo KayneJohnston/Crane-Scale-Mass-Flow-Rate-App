@@ -1,7 +1,7 @@
 // CSV / JSON export and sharing (iOS share sheet: AirDrop, Mail, Files, ...).
 
 const FLAG_NAMES = ['pre', 'ok', 'slow', 'touch', 'spike'];
-const STATUS_NAMES = ['no-flow', 'measuring', 'on-target', 'too-fast', 'too-slow'];
+const STATUS_NAMES = ['no-flow', 'measuring', 'on-target', 'too-fast', 'too-slow', 'flow-dropping'];
 
 const esc = (v) => {
   if (v == null) return '';

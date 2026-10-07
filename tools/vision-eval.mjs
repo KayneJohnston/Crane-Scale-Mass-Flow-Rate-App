@@ -8,6 +8,8 @@ import { encodePNG } from './png.js';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
 const count = +(process.argv[2] || 200);
+const offIdx = process.argv.indexOf('--offset');
+const offset = offIdx > 0 ? +process.argv[offIdx + 1] : 0;
 const dumpIdx = process.argv.indexOf('--dump');
 const dumpDir = dumpIdx > 0 ? process.argv[dumpIdx + 1] : null;
 if (dumpDir) mkdirSync(dumpDir, { recursive: true });
@@ -39,7 +41,7 @@ function run() {
   let ok = 0, wrong = 0, failed = 0;
   const reasons = {};
   const t0 = Date.now();
-  for (let s = 1; s <= count; s++) {
+  for (let s = 1 + offset; s <= count + offset; s++) {
     const { W, H, value, opts } = randomScene(s, process.argv.includes('--hard'));
     const buf = new Uint8ClampedArray(W * H * 4);
     renderDisplay(buf, W, H, opts);

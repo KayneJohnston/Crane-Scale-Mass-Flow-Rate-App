@@ -28,9 +28,9 @@ export const ENGINE_DEFAULTS = {
   R0: 40 * 40,             // initial measurement variance (kg^2) until estimated from data
   // automatic session start
   autoStart: true,
-  startWindowSec: 20,
+  startWindowSec: 30,
   startMinRateKgMin: 200,
-  startMinRiseKg: 120,
+  startMinRiseKg: 80,
   startT: 3,               // slope must be > 3 standard errors above zero
   startHold: 3,            // ... for 3 consecutive bins
   preBufferSec: 90,
@@ -59,10 +59,11 @@ export const ENGINE_DEFAULTS = {
   warmupSec: 12,
   maxRelSd: 0.15,
   hystPct: 1,
+  stopGraceSec: 15,
 };
 
 export const FLAG_CODES = { pre: 0, ok: 1, slow: 2, low: 3, high: 4 };
-export const STATUS_CODES = { noflow: 0, measuring: 1, ok: 2, fast: 3, slow: 4 };
+export const STATUS_CODES = { noflow: 0, measuring: 1, ok: 2, fast: 3, slow: 4, stopping: 5 };
 
 function makeId(wallMs) {
   const d = new Date(wallMs);
@@ -404,7 +405,7 @@ export class TapEngine {
     }
     if (S.lastFlowEnd != null) onset = Math.max(onset, S.lastFlowEnd);
     b = Math.min(this.qMax, Math.max(0, b));
-    S.flowing = true; S.offSince = null; S.onCount = 0;
+    S.flowing = true; S.offSince = null; S.onCount = 0; S.lowSince = null;
     S.segOnset = onset; S.levelBefore = a;
     S.segments.push({ onset: r1(onset), levelBefore: Math.round(a), end: null });
     S.kf.init(onset, a, b, S.R, Math.max(seB ?? 1, 1) ** 2);
@@ -438,8 +439,17 @@ export class TapEngine {
     if (!S.flowing || !S.kfActive) { S.main = { status: 'noflow' }; rec.st = 0; return; }
     const q = S.kf.q * 60, sd = Math.sqrt(S.kf.Pqq) * 60, ci = 1.645 * sd;
     const tgt = c.targetKgMin, hi = tgt * (1 + c.tolPct / 100), lo = tgt * (1 - c.tolPct / 100), h = (tgt * c.hystPct) / 100;
+    // A rate far below the band (under half the low limit, i.e. outside the normal
+    // operating range) right after normal flow is usually the tap ending, not a slow
+    // tap: show "flow dropping" (no alarm) until it has persisted for stopGraceSec.
+    // ... or a rate below the band that has fallen > 15% within 10 s (flow decaying)
+    let q10 = q;
+    for (let i = S.meas.length - 1; i >= 0 && S.meas[i].t >= rec.t - 10; i--) if (S.meas[i].q != null) q10 = Math.max(q10, S.meas[i].q * 60);
+    const declining = q < lo && q < 0.85 * q10;
+    if (q < 0.5 * lo || declining) { if (S.lowSince == null) S.lowSince = rec.t; } else S.lowSince = null;
     let status;
     if (rec.t - S.segOnset < c.warmupSec || sd > c.maxRelSd * tgt) status = 'measuring';
+    else if (S.lowSince != null && rec.t - S.lowSince < c.stopGraceSec) status = 'stopping';
     else {
       let st = S.mainState;
       if (st === 'ok') { if (q > hi + h) st = 'fast'; else if (q < lo - h) st = 'slow'; }
