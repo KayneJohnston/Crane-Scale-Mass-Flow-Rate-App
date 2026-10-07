@@ -425,6 +425,9 @@ export function readDigits(rgba, w, h, opts = {}) {
       g.margin = ok ? 1 : 0;
       g.conf = ok ? Math.max(0, Math.min(1, Math.min(g.cu, g.cl) / 0.6)) : 0;
       g.good = ok;
+      // a narrow glyph can only be a "1"
+      g.costs = new Float64Array(10).fill(4);
+      g.costs[1] = g.cost;
       return g;
     }
     const nv = new Float64Array(7);
@@ -448,8 +451,12 @@ export function readDigits(rgba, w, h, opts = {}) {
     // every digit cell on a display has the same width (only "1" is narrow), so a
     // piece much wider/narrower than the typical digit is not one digit
     const wr = g.w / Wt;
-    if (wr > 1.3 || wr < 0.7) { g.good = false; g.cost += 3; }
-    else if (wr > 1.18 || wr < 0.8) g.cost += 0.8;
+    const widthPen = wr > 1.3 || wr < 0.7 ? 3 : wr > 1.18 || wr < 0.8 ? 0.8 : 0;
+    if (widthPen >= 3) g.good = false;
+    g.cost += widthPen;
+    // cost of reading this glyph as each digit 0-9 (used with the temporal prior)
+    g.costs = new Float64Array(10);
+    for (let d = 0; d < 10; d++) g.costs[d] = (perChar.get(String(d)) ?? 7) + widthPen + (d === 1 ? 3 : 0);
     return g;
   };
 
@@ -586,18 +593,26 @@ export function readDigits(rgba, w, h, opts = {}) {
     if (P < 0.55 * H || P > 1.4 * H || worst > Math.max(2, 0.14 * P)) return fail('pitch');
   }
 
-  let text = '', minConf = 1;
+  // The segmentation is sound. Report every glyph, plus the cost of reading it as
+  // each digit 0-9 (the "lattice"): even when one digit is too ambiguous for a
+  // stand-alone reading, the lattice lets the temporal tracker test whether the
+  // digits fit the value expected from the previous readings.
   for (const g of glyphs) {
     const quad = [toOrig(g.umin, top), toOrig(g.umax + 1, top), toOrig(g.umax + 1, bottom), toOrig(g.umin, bottom)];
     const d = { ch: g.ch, conf: g.conf, cost: g.cost, margin: g.margin, quad };
     if (g.narrow) Object.assign(d, { cover: [+g.cu.toFixed(2), +g.cl.toFixed(2)], wid: +(g.w / H).toFixed(2), extent: +g.extent.toFixed(2) });
     else d.fills = Array.from(g.nv, (x) => +x.toFixed(2));
     res.digits.push(d);
-    if (!g.good) return fail(g.narrow ? 'partial-1' : 'unknown-glyph');
-    text += g.ch; minConf = Math.min(minConf, g.conf);
   }
   const u0 = glyphs[0].umin, u1 = glyphs[glyphs.length - 1].umax + 1;
   res.bandQuad = [toOrig(u0, top), toOrig(u1, top), toOrig(u1, bottom), toOrig(u0, bottom)];
+  if (!o.expectDigits || glyphs.length === o.expectDigits) res.lattice = { n: glyphs.length, costs: glyphs.map((g) => g.costs) };
+
+  let text = '', minConf = 1;
+  for (const g of glyphs) {
+    if (!g.good) return fail(g.narrow ? 'partial-1' : 'unknown-glyph');
+    text += g.ch; minConf = Math.min(minConf, g.conf);
+  }
   res.text = text;
   res.conf = minConf;
   res.ok = true;

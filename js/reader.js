@@ -22,11 +22,12 @@ export class BrowserReader {
     };
   }
 
-  read(el, srcW, srcH, view, cfg) {
+  /** t: frame time in seconds (enables the check against previous readings). */
+  read(el, srcW, srcH, view, cfg, t = null) {
     const t0 = performance.now();
     let res;
     try {
-      res = readFrame(this.sampler(el), srcW, srcH, view, cfg, this.track);
+      res = readFrame(this.sampler(el), srcW, srcH, view, cfg, this.track, t);
     } catch (e) {
       res = { ok: false, reason: 'error: ' + (e?.message || e), value: null, conf: 0 };
     }

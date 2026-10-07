@@ -12,7 +12,7 @@ import { Beeper } from './audio.js';
 import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js';
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.2.0';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -415,9 +415,9 @@ function stepDemo(now) {
 function processFrame(el, w, h, T, wall) {
   if (!w || !h) return;
   const view = viewRect();
-  const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug });
+  const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug }, T);
   app.lastRes = res;
-  app.engine.pushFrame(T, wall, res.ok ? res.value : null, res.conf);
+  app.engine.pushFrame(T, wall, res.ok ? res.value : null, res.conf, res.how);
   app.frames++;
   drawOverlay(res, view);
   if (settings.debug) drawDebug(res);
@@ -473,12 +473,15 @@ function drawOverlay(res, v) {
   }
   const b = $('readingBadge');
   b.hidden = false;
-  if (res.ok) { b.textContent = `${fmtInt(res.value)} kg`; b.classList.remove('bad'); }
+  // "≈": an unclear frame resolved using the value expected from the previous readings
+  if (res.ok) { b.textContent = `${res.how === 'prior' ? '≈' : ''}${fmtInt(res.value)} kg`; b.classList.remove('bad'); }
   else { b.textContent = reasonText(res); b.classList.add('bad'); }
 }
 
 function reasonText(res) {
   const r = res.reason || '';
+  if (r === 'locking') return 'Locking on…';
+  if (r === 'jump-pending') return `Checking ${res.strict != null ? fmtInt(res.strict) : 'jump'}…`;
   if (r === 'no-display' || r === 'not-found') return 'Looking for red digits…';
   if (r.startsWith('invalid-range')) return `Out of range (${res.text || '?'})`;
   if (r.startsWith('invalid-step')) return `Not a ${settings.stepKg} kg step (${res.text})`;
@@ -515,6 +518,7 @@ function drawDebug(res) {
     `threshold ${r ? r.threshold.toFixed(0) : '—'}  contrast ${r ? r.contrast : '—'}  conf ${(res.conf || 0).toFixed(2)}`,
     r?.digits?.length ? 'digits: ' + r.digits.map((g) => `${g.ch}(${g.conf.toFixed(2)})`).join(' ') : '',
     `${app.fps.toFixed(1)} frames/s · ${(res.ms || 0).toFixed(1)} ms/frame · source ${srcDims().join('×')} · zoom ${app.zoomTotal.toFixed(1)}× (lens ${app.hwZoom.toFixed(1)}×)`,
+    res.pred ? `history: expect ${fmtInt(res.pred.value)} ±${fmtInt(res.pred.band)} kg · decision ${res.how}${res.strict != null && res.strict !== res.value ? ' (read ' + fmtInt(res.strict) + ')' : ''}` : `history: ${res.how || 'off'}`,
     app.engine?.sess ? `noise σ ${Math.sqrt(app.engine.sess.R).toFixed(0)} kg · measurements ${app.engine.sess.meas.length}` : '',
   ];
   $('dbgText').textContent = lines.filter(Boolean).join('\n');

@@ -101,16 +101,20 @@ export class TapEngine {
 
   // ------------------------------------------------------------- input --
 
-  /** One processed camera frame: value in kg or null if unreadable. */
-  pushFrame(T, wall, value, conf = 0) {
+  /**
+   * One processed camera frame: value in kg or null if unreadable.
+   * `how` (optional) records how the reader decided (ok, prior, jump-pending, ...).
+   */
+  pushFrame(T, wall, value, conf = 0, how = null) {
     this.lastT = Math.max(this.lastT, T);
     if (wall != null) this.wallOffset = wall - T * 1000;
     if (value != null) { this.lastValue = value; this.lastValueT = T; }
     const S = this.sess;
     const c = Math.round((conf || 0) * 100) / 100;
-    if (S) S.raw.push([+(T - S.T0).toFixed(3), value ?? null, c]);
+    const extra = how ? [how] : [];
+    if (S) S.raw.push([+(T - S.T0).toFixed(3), value ?? null, c, ...extra]);
     else {
-      this.rawBuf.push([T, value ?? null, c]);
+      this.rawBuf.push([T, value ?? null, c, ...extra]);
       const cut = T - this.cfg.preBufferSec;
       if (this.rawBuf.length && this.rawBuf[0][0] < cut) this.rawBuf = this.rawBuf.filter((r) => r[0] >= cut);
     }
@@ -175,7 +179,7 @@ export class TapEngine {
     const S = (this.sess = {
       id: makeId(wall0), T0, wall0, startReason: reason,
       meas: [], events: [], segments: [],
-      raw: this.rawBuf.filter((r) => r[0] >= T0).map((r) => [+(r[0] - T0).toFixed(3), r[1], r[2]]),
+      raw: this.rawBuf.filter((r) => r[0] >= T0).map((r) => [+(r[0] - T0).toFixed(3), ...r.slice(1)]),
       kf: new RateKF(this.Sq), kfActive: false, R: c.R0, rN: 0,
       floorM: 0, floorP: 0, floorT: 0,
       lowRun: 0, highRun: 0, slowHist: [],

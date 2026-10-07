@@ -59,8 +59,8 @@ export function sessionCSV(sess) {
 
 /** Every processed camera frame. */
 export function rawCSV(sess) {
-  const rows = [...metaLines(sess), 'time_s,clock,reading_kg,confidence'];
-  for (const [t, v, c] of sess.raw || []) rows.push([t, iso(sess.wall0 + t * 1000), v ?? '', c].join(','));
+  const rows = [...metaLines(sess), 'time_s,clock,reading_kg,confidence,decision'];
+  for (const [t, v, c, how] of sess.raw || []) rows.push([t, iso(sess.wall0 + t * 1000), v ?? '', c, how ?? ''].join(','));
   return rows.join('\n') + '\n';
 }
 

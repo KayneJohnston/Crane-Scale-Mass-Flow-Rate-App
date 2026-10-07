@@ -19,6 +19,8 @@ export const DEFAULTS = {
   procFps: 10,
   minConf: 0.15,
   videoFps: 8,
+  temporal: true,
+  relockFrames: 3,
   // automatic start / stop
   autoStart: true,
   autoStop: true,
@@ -70,6 +72,8 @@ export const SCHEMA = [
       { key: 'strictness', label: 'Red strictness', type: 'number', min: 0.3, max: 1.5, step: 0.05, help: 'Lower it if bright digits look white/pink on screen (over-exposed).' },
       { key: 'procFps', label: 'Frames analysed per second', type: 'number', min: 2, max: 20, step: 1 },
       { key: 'videoFps', label: 'Video analysis frames per second', type: 'number', min: 2, max: 30, step: 1 },
+      { key: 'temporal', label: 'Check each reading against the previous ones', type: 'checkbox', help: 'A reading far from the last few (e.g. 20050 then 10050) is only believed once it repeats; unclear frames are resolved using the expected value.' },
+      { key: 'relockFrames', label: 'Frames needed to believe a sudden jump', type: 'number', min: 1, max: 10, step: 1 },
     ],
   },
   {
@@ -132,5 +136,6 @@ export function readerConfig(s) {
   return {
     colorMode: s.colorMode, strictness: +s.strictness, minKg: +s.minKg, maxKg: +s.maxKg,
     stepKg: +s.stepKg, multiplier: +s.multiplier, minConf: +s.minConf,
+    temporal: s.temporal !== false, relockFrames: Math.max(1, Math.round(+s.relockFrames || 3)),
   };
 }
