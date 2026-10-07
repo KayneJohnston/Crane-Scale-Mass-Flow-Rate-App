@@ -1,0 +1,13 @@
+{
+  "name": "crane-scale-mfr",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "iPhone web app: reads a red seven-segment crane scale with the camera and computes the metal tap rate (kg/min).",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "eval": "node tools/vision-eval.mjs 300",
+    "icons": "node tools/make-icons.mjs",
+    "serve": "npx http-server -c-1 -p 8080 ."
+  }
+}
