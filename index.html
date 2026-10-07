@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Tap Rate">
+  <meta name="theme-color" content="#0b0d10">
+  <meta name="description" content="Reads a crane scale with the camera and shows the metal tap rate in kg/min against target.">
+  <title>Tap Rate</title>
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon-192.png" type="image/png">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+  <div id="app">
+    <header class="topbar">
+      <div class="status-pill" id="statusPill" data-kind="idle">Camera off</div>
+      <div class="top-actions">
+        <button class="icon-btn" id="btnMute" aria-label="Mute alerts" title="Mute alerts">🔔</button>
+        <button class="icon-btn" id="btnDebug" aria-label="Show vision debug" title="Vision debug">👁</button>
+        <button class="icon-btn" id="btnPower" aria-label="Stop camera" title="Stop camera">⏻</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- LIVE -->
+      <section class="view active" id="view-live">
+        <div class="cam-box" id="camBox">
+          <video id="video" playsinline muted autoplay></video>
+          <canvas id="simCanvas" width="960" height="540" hidden></canvas>
+          <canvas id="overlay"></canvas>
+          <div class="reading-badge" id="readingBadge" hidden></div>
+          <div class="cam-zoom">
+            <input type="range" id="zoom" min="1" max="12" step="0.1" value="1" aria-label="Zoom">
+            <span id="zoomLabel">1.0×</span>
+          </div>
+          <div class="cam-start" id="camStart">
+            <button class="btn primary big" id="btnCamera">Start camera</button>
+            <p class="hint">Aim at the scale. Pinch or use the slider to zoom so the red digits are clearly visible inside this box.</p>
+          </div>
+          <div class="cam-progress" id="camProgress" hidden><div id="camProgressBar"></div></div>
+        </div>
+
+        <div class="main-indicator" id="mainInd" data-state="idle">
+          <div class="mi-arrow" id="miArrow">–</div>
+          <div class="mi-body">
+            <div class="mi-rate"><span id="miRate">—</span><span class="unit">kg/min</span></div>
+            <div class="mi-label" id="miLabel">Waiting for a tap</div>
+            <div class="mi-sub" id="miSub">Target 600 ±10%</div>
+          </div>
+        </div>
+
+        <div class="tiles" id="tiles"></div>
+
+        <div class="infobar">
+          <div><span class="k">Weight</span><span class="v" id="infWeight">—</span></div>
+          <div><span class="k">Tapped</span><span class="v" id="infTapped">—</span></div>
+          <div><span class="k">Time</span><span class="v" id="infTime">—</span></div>
+          <div class="touch-flag" id="infTouch" hidden>⚠ Touch</div>
+        </div>
+
+        <div class="chart-wrap"><canvas id="liveChart"></canvas></div>
+
+        <div class="controls">
+          <button class="btn primary" id="btnStartStop" disabled>Start tap</button>
+          <button class="btn" id="btnDetails">Details</button>
+          <label class="toggle"><input type="checkbox" id="chkAuto" checked><span>Auto</span></label>
+        </div>
+
+        <div class="debug-panel" id="debugPanel" hidden>
+          <div class="dbg-imgs"><canvas id="dbgCrop"></canvas><canvas id="dbgMask"></canvas></div>
+          <pre id="dbgText"></pre>
+          <div class="row"><button class="btn small" id="btnSnapshot">Save snapshot</button></div>
+        </div>
+      </section>
+
+      <!-- HISTORY -->
+      <section class="view" id="view-history">
+        <div class="view-head">
+          <h2>History</h2>
+          <div class="row wrap">
+            <button class="btn small" id="btnExportAll">Export CSV</button>
+            <button class="btn small" id="btnBackup">Backup</button>
+            <label class="btn small file-btn">Import<input type="file" id="fileImport" accept=".json,application/json" hidden></label>
+          </div>
+        </div>
+        <div id="historyList" class="history-list"></div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view" id="view-settings">
+        <div class="view-head"><h2>Settings</h2></div>
+        <div id="settingsForm"></div>
+        <div class="settings-group">
+          <h3>Camera</h3>
+          <label class="field"><span>Camera / lens</span>
+            <select id="selCamera"><option value="">Rear camera (default)</option></select>
+          </label>
+          <p class="help">Pro iPhones list a “Telephoto” lens — best for reading the scale from 15 m. The list fills in after the camera has been started once.</p>
+        </div>
+        <div class="settings-group">
+          <h3>Tools</h3>
+          <div class="row wrap">
+            <label class="btn file-btn">Analyse a video…<input type="file" id="fileVideo" accept="video/*" hidden></label>
+            <button class="btn" id="btnDemo">Run demo</button>
+            <select id="selDemoSpeed" aria-label="Demo speed">
+              <option value="1">1× (through the vision pipeline)</option>
+              <option value="5" selected>5×</option>
+              <option value="20">20×</option>
+            </select>
+          </div>
+          <p class="help">Video: record the display with the iPhone Camera app (zoomed in), then analyse it here. Demo: a simulated tap with noise, touches and misreads.</p>
+        </div>
+        <div class="settings-group">
+          <h3>About</h3>
+          <p class="help" id="aboutText"></p>
+          <div class="row wrap">
+            <button class="btn small" id="btnUpdate">Check for update</button>
+            <button class="btn small" id="btnResetSettings">Reset settings</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <nav class="tabbar">
+      <button class="tab active" data-view="live"><span>◉</span>Live</button>
+      <button class="tab" data-view="history"><span>☰</span>History</button>
+      <button class="tab" data-view="settings"><span>⚙</span>Settings</button>
+    </nav>
+  </div>
+
+  <!-- tap details form -->
+  <dialog id="dlgMeta">
+    <form method="dialog" id="formMeta">
+      <h3>Tap details</h3>
+      <label class="field"><span>Pot number(s)</span><input name="pots" inputmode="numeric" placeholder="e.g. 412, 413" autocomplete="off"></label>
+      <label class="field"><span>Crucible ID</span><input name="crucible" autocomplete="off"></label>
+      <label class="field"><span>Crew / shift</span><input name="crew" autocomplete="off" placeholder="e.g. B"></label>
+      <label class="field"><span>Operator</span><input name="operator" autocomplete="off"></label>
+      <label class="field"><span>Notes</span><textarea name="notes" rows="2"></textarea></label>
+      <div class="row end">
+        <button class="btn" value="cancel">Cancel</button>
+        <button class="btn primary" value="save" id="btnMetaSave">Save</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- session detail -->
+  <dialog id="dlgSession" class="wide">
+    <div class="dlg-head">
+      <h3 id="sesTitle">Session</h3>
+      <button class="icon-btn" id="btnSesClose" aria-label="Close">✕</button>
+    </div>
+    <div id="sesBody"></div>
+    <div class="chart-wrap tall"><canvas id="sesChart"></canvas></div>
+    <div class="row wrap">
+      <button class="btn small" id="btnSesEdit">Edit details</button>
+      <button class="btn small" id="btnSesCsv">Export CSV</button>
+      <button class="btn small" id="btnSesRaw">Raw frames CSV</button>
+      <button class="btn small danger" id="btnSesDelete">Delete</button>
+    </div>
+  </dialog>
+
+  <div class="toast" id="toast" hidden></div>
+  <script type="module" src="js/main.js"></script>
+</body>
+</html>
