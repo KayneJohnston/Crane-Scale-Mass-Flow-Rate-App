@@ -25,8 +25,8 @@ export const DEFAULTS = {
   // automatic start / stop
   autoStart: true,
   autoStop: true,
-  stallSec: 120,
-  lostSec: 45,
+  stallSec: 180,
+  lostSec: 180,
   startMinRiseKg: 80,
   // filter
   rateVar: 100,
@@ -91,8 +91,8 @@ export const SCHEMA = [
     items: [
       { key: 'autoStart', label: 'Start when the weight starts rising', type: 'checkbox' },
       { key: 'autoStop', label: 'Stop automatically', type: 'checkbox' },
-      { key: 'stallSec', label: 'Stop when weight has not risen for', unit: 's', type: 'number', min: 20, max: 1200, step: 5 },
-      { key: 'lostSec', label: 'Stop when the display is lost for', unit: 's', type: 'number', min: 5, max: 600, step: 5 },
+      { key: 'stallSec', label: 'Stop when weight has not risen for', unit: 's', type: 'number', min: 20, max: 1200, step: 5, help: 'Must be longer than a pot change (crane move + vacuum build-up, about 2 min) or the crucible is split into one recording per pot.' },
+      { key: 'lostSec', label: 'Stop when the display is lost for', unit: 's', type: 'number', min: 5, max: 600, step: 5, help: 'Long enough for the crane move between pots. The recording ends at the last reading, not at this time-out.' },
       { key: 'startMinRiseKg', label: 'Rise needed to start', unit: 'kg', type: 'number', min: 50, max: 1000, step: 10 },
     ],
   },
@@ -116,10 +116,18 @@ export const SCHEMA = [
 export function loadSettings() {
   let s = {};
   try { s = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch { s = {}; }
-  // v0.2 saved its default range (10,000-30,000 kg), which refuses e.g. an empty
-  // crucible at 3,050 kg: move it to the new default unless the user changed it
-  if (!s.settingsRev && +s.minKg === 10000 && +s.maxKg === 30000) { delete s.minKg; delete s.maxKg; }
-  s.settingsRev = 2;
+  // Saved settings include the defaults of their time. Move an old default to the new
+  // one unless the user changed it:
+  const rev = +s.settingsRev || 0;
+  // v0.2's range (10,000-30,000 kg) refused e.g. an empty crucible at 3,050 kg
+  if (rev < 2 && +s.minKg === 10000 && +s.maxKg === 30000) { delete s.minKg; delete s.maxKg; }
+  // up to v0.3.4 the recording stopped 2 min after the weight stopped rising (45 s
+  // without a reading), which split a crucible at every pot change
+  if (rev < 3) {
+    if (+s.stallSec === 120) delete s.stallSec;
+    if (+s.lostSec === 45) delete s.lostSec;
+  }
+  s.settingsRev = 3;
   return { ...DEFAULTS, ...s, lastMeta: { ...DEFAULTS.lastMeta, ...(s.lastMeta || {}) } };
 }
 

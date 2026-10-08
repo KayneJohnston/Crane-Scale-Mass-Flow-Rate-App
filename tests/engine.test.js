@@ -8,7 +8,7 @@ import { runSim } from '../tools/engine-run.mjs';
 const W0 = Date.UTC(2026, 9, 7, 8, 0, 0);
 
 test('auto start, touch rejection, flow stop and auto end on a simulated tap', () => {
-  const { sim, ended, events, trace } = runSim(4);
+  const { sim, eng, ended, events, trace } = runSim(4);
   assert.equal(ended.length, 1);
   const s = ended[0];
   assert.equal(s.startReason, 'auto');
@@ -19,8 +19,9 @@ test('auto start, touch rejection, flow stop and auto end on a simulated tap', (
   assert.ok(Math.abs(seg.end + T0 - sim.tapEnd) < 6, `end ${seg.end + T0} vs ${sim.tapEnd}`);
   // both touch events detected, none invented
   assert.equal(events.filter((e) => e.type === 'touch').length, 2);
-  // the session ends ~2 min after the weight stops rising
-  assert.ok(s.duration + T0 - sim.tapEnd > 100 && s.duration + T0 - sim.tapEnd < 140);
+  // the session ends when the weight hasn't risen for stallSec (3 min)
+  const after = s.duration + T0 - sim.tapEnd;
+  assert.ok(after > eng.cfg.stallSec - 20 && after < eng.cfg.stallSec + 20, `ended ${after} s after the tap`);
   // live Kalman rate
   const errs = trace.filter((p) => !sim.inTouch(p.t) && p.truth > 100).map((p) => (p.est - p.truth) / p.truth);
   const rmse = Math.sqrt(errs.reduce((a, x) => a + x * x, 0) / errs.length);
@@ -70,6 +71,32 @@ test('a crucible filled from two pots gives one session with two taps', () => {
   assert.equal(a.segments.length, 2);
   assert.ok(Math.abs(a.segments[1].massKg - 3300) < 100, `mass2 ${a.segments[1].massKg}`);
   assert.ok(Math.abs(a.segments[1].avgKgMin - sim.avgRateOf(1)) / sim.avgRateOf(1) < 0.04);
+});
+
+test('a standard crucible (three pots, 1.5-2.5 min pot changes, display lost while moving) stays one session', () => {
+  // ~16 t empty, then 3.5 t, 3.5 t and 2 t. Each pot change: the crane moves (~1 min,
+  // display out of view) and the vacuum builds up before metal flows again. The 150 s
+  // and 90 s cases once ended the recording (the filter ran on across the blind minute,
+  // so the unchanged weight looked like a touch) and found a phantom tap at the gap.
+  for (const [seed, gapSec] of [[21, 120], [3, 150], [4, 90]]) {
+    const sim = new TapSimulator({ seed, startMass: 16000, taps: [{ mass: 3500 }, { mass: 3500, rate0: 900 }, { mass: 2000, rate0: 800 }], gapSec });
+    const moving = sim.tapList.slice(0, -1).map((tp) => [tp.end + 5, tp.end + 65]);
+    const ended = [];
+    const eng = new TapEngine({}, { onSessionEnd: (s) => ended.push(s) });
+    for (let t = 0; t < sim.duration + 5; t += 0.1) {
+      const f = moving.some(([a, b]) => t >= a && t < b) ? { value: null } : sim.frame(t);
+      eng.pushFrame(t, W0 + t * 1000, f.value, f.conf);
+    }
+    const tag = `seed ${seed}, ${gapSec} s pot changes`;
+    assert.equal(ended.length, 1, tag);
+    assert.equal(ended[0].endReason, 'stall', tag);
+    const a = analyseSession(ended[0]);
+    assert.equal(a.segments.length, 3, tag);
+    a.segments.forEach((g, i) => {
+      assert.ok(Math.abs(g.massKg - sim.tapList[i].mass) < 100, `${tag}, pot ${i + 1}: ${g.massKg} kg`);
+      assert.ok(Math.abs(g.avgKgMin - sim.avgRateOf(i)) / sim.avgRateOf(i) < 0.04, `${tag}, pot ${i + 1}: ${g.avgKgMin} vs ${sim.avgRateOf(i)} kg/min`);
+    });
+  }
 });
 
 test('robust to a camera that drops 30% of frames and misreads 3%', () => {

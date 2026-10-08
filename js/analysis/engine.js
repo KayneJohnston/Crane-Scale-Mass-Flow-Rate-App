@@ -40,11 +40,12 @@ export const ENGINE_DEFAULTS = {
   flowOnKgMin: 200,
   flowOffKgMin: 100,
   flowOffHoldSec: 8,
-  // automatic session end
+  // automatic session end. A crucible is filled from several pots: moving to the next
+  // pot (~1 min) and building up the vacuum (~1 min) must not end the recording.
   autoStop: true,
-  stallSec: 120,           // end when the weight has not risen ...
+  stallSec: 180,           // end when the weight has not risen ...
   stallRiseKg: 100,        // ... by this much over stallSec
-  lostSec: 45,             // end after this long without any valid reading
+  lostSec: 180,            // end after this long without any valid reading
   longLowSec: 60,          // "touch" lasting longer than this ends the session
   touchMinKg: 120,         // smallest drop reported as a touch event
   noSignalSec: 3,
@@ -55,6 +56,7 @@ export const ENGINE_DEFAULTS = {
   huberC: 2,
   reinitHighN: 8,
   reinitSlowN: 7,          // of the last 10 accepted points
+  blindSec: 15,            // no reading at all for this long: the flow may have stopped or changed
   // display
   warmupSec: 12,
   maxRelSd: 0.15,
@@ -250,12 +252,21 @@ export class TapEngine {
       const lvl = median(zz) + 0.5 * S.kf.q * (rec.t - mean(tt));
       return lvl - c.gateLow * Math.sqrt((4.7 * R) / n + R);
     }
+    // Few recent readings (display lost, long touch): the level of the last accepted
+    // readings. Not the filter's estimate, which may have run on across the gap.
+    const k0 = Math.max(0, i1 - 5);
+    if (i1 > k0) return median(A.z.slice(k0, i1)) - c.gateLow * Math.sqrt((4.7 * R) / (i1 - k0) + R);
     return S.floorM - c.gateLow * Math.sqrt(S.floorP + R);
   }
 
   kfProcess(rec) {
     const S = this.sess, c = this.cfg, kf = S.kf;
     const floor = this.floorFor(rec);
+    // After a spell with no readings at all (e.g. the crane moving to the next pot), the
+    // flow may have stopped or changed meanwhile: the rate carried across the gap is
+    // uncertain by about half its value, so the filter re-locks onto the new readings.
+    const prev = S.meas[rec.i - 1];
+    if (prev && rec.t - prev.t > c.blindSec) kf.Pqq += (kf.q / 2) ** 2;
     kf.predict(rec.t);
     const R = S.R;
     const sd = Math.sqrt(kf.Pmm + R);

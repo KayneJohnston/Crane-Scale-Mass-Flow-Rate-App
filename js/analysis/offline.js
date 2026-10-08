@@ -16,11 +16,12 @@ import { robustSlope, hingeOnset, hingeStop, median, lowerBound } from './stats.
 import { smoothRate, rateVarToS } from './kalman.js';
 
 // bump when the analysis changes, so saved taps are analysed again
-export const ANALYSIS_VERSION = 2;
+export const ANALYSIS_VERSION = 3;
 
 export const OFFLINE_DEFAULTS = {
   onKgMin: 150,
   mergeGapSec: 10,
+  minRunSec: 5,        // shorter blips of the 30 s rate are noise, not taps
   minSegSec: 20,
   minSegKg: 150,
   halfWin: 15,
@@ -86,19 +87,25 @@ export function analyseSession(sess, opts = {}) {
     if (runs[j + 1][0] - runs[j][1] <= o.mergeGapSec) runs.splice(j, 2, [runs[j][0], runs[j + 1][1]]);
     else j++;
   }
+  // A lone blip is not a tap: e.g. a few noisy readings at the edge of a gap in the
+  // data (display out of view while the crane moves to the next pot).
+  runs = runs.filter(([a, b]) => b - a >= o.minRunSec);
   // fall back to the live segments if the smoothed curve found none
   if (!runs.length && sess.segments?.length) runs = sess.segments.map((s) => [s.onset, s.end ?? t[n - 1]]);
 
   const touches = (sess.events || []).filter((e) => e.type === 'touch-end');
   const Sq = rateVarToS(cfg.rateVar ?? 100);
   const curves = [];
-  for (const [rs, re] of runs) {
+  for (let k = 0; k < runs.length; k++) {
+    const [rs, re] = runs[k];
+    // (never reaching into the previous or the next tap)
+    const prevEnd = k > 0 ? runs[k - 1][1] : -Infinity, nextStart = k + 1 < runs.length ? runs[k + 1][0] : Infinity;
     // refine the start: flat-then-rising change point
-    let a0 = lowerBound(t, rs - 45), a1 = lowerBound(t, Math.min(re, rs + 40));
+    let a0 = lowerBound(t, Math.max(prevEnd, rs - 45)), a1 = lowerBound(t, Math.min(re, rs + 40));
     const hOn = hingeOnset(t.slice(a0, a1), z.slice(a0, a1), { minTail: 3 });
     let onset = hOn ? hOn.tau : rs - o.halfWin / 2;
     // refine the end: rising-then-flat change point
-    a0 = lowerBound(t, Math.max(onset + 5, re - 40)); a1 = lowerBound(t, re + 45);
+    a0 = lowerBound(t, Math.max(onset + 5, re - 40)); a1 = lowerBound(t, Math.min(nextStart, re + 45));
     const hOff = hingeStop(t.slice(a0, a1), z.slice(a0, a1), { minHead: 3 });
     let end = hOff ? hOff.tau : re + o.halfWin / 2;
     onset = Math.max(t[0], onset); end = Math.min(t[n - 1], Math.max(end, onset + 1));
@@ -108,8 +115,8 @@ export function analyseSession(sess, opts = {}) {
       const i0 = lowerBound(t, from), i1 = lowerBound(t, to);
       return i1 - i0 >= 6 ? { v: median(z.slice(i0, i1)), n: i1 - i0 } : null;
     };
-    const before = lvl(onset - o.levelWin, onset - 0.5);
-    const after = lvl(end + 0.5, end + o.levelWin);
+    const before = lvl(Math.max(prevEnd, onset - o.levelWin), onset - 0.5);
+    const after = lvl(end + 0.5, Math.min(nextStart, end + o.levelWin));
     const levelBefore = before ? before.v : hOn ? hOn.a : z[lowerBound(t, onset)];
     let levelAfter, openEnd = false;
     if (after) levelAfter = after.v;

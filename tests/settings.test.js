@@ -25,6 +25,22 @@ test('the old default range is upgraded, a range the user chose is kept', () => 
   assert.equal(loadSettings().minKg, 10000);
 });
 
+test('the old 2 min / 45 s stop limits move to the new defaults, limits the user chose are kept', () => {
+  assert.ok(DEFAULTS.stallSec >= 180 && DEFAULTS.lostSec >= 180, 'a pot change (~2 min) must not end the recording');
+  store[KEY] = JSON.stringify({ settingsRev: 2, stallSec: 120, lostSec: 45, targetKgMin: 650 });
+  const a = loadSettings();
+  assert.deepEqual([a.stallSec, a.lostSec, a.targetKgMin], [DEFAULTS.stallSec, DEFAULTS.lostSec, 650]);
+
+  store[KEY] = JSON.stringify({ settingsRev: 2, stallSec: 300, lostSec: 60 });
+  const b = loadSettings();
+  assert.deepEqual([b.stallSec, b.lostSec], [300, 60]);
+
+  // chosen again after the upgrade: kept
+  store[KEY] = JSON.stringify({ ...a, stallSec: 120, lostSec: 45 });
+  const c = loadSettings();
+  assert.deepEqual([c.stallSec, c.lostSec], [120, 45]);
+});
+
 test('low power mode: a lighter camera stream, fewer readings, slower screen updates', async () => {
   const { powerProfile } = await import('../js/settings.js');
   const normal = powerProfile(DEFAULTS);

@@ -19,7 +19,7 @@ import { ESTIMATORS as CANDIDATES, REFERENCES } from './estimators.mjs';
 
 const ESTIMATORS = [...CANDIDATES, ...REFERENCES];
 
-const CACHE_V = 3; // bump when the harness or the engine changes
+const CACHE_V = 4; // bump when the harness or the engine changes
 const cacheDir = path.join(os.tmpdir(), 'tap-filter-bench');
 
 function loadCase(scenario, seed) {

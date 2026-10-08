@@ -17,7 +17,7 @@ export const SIM_DEFAULTS = {
   rateEnd: 650,             // kg/min the operator settles at
   rateTau: 80,              // s
   wander: 40, wanderTau: 30, // kg/min random wander (Ornstein-Uhlenbeck)
-  idleBefore: 30, idleAfter: 170,
+  idleBefore: 30, idleAfter: 240, // after: longer than the app waits before it stops recording
   taps: null,               // e.g. [{mass: 3600}, {mass: 3400, rate0: 800}] for a multi-pot crucible
   gapSec: 70,               // pause between taps (crane moving to the next pot)
   touches: 2, touchDepth: [300, 1500], touchDur: [3, 9],
