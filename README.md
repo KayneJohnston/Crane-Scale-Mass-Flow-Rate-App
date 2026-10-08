@@ -158,6 +158,8 @@ The Kalman filter for this model is the textbook optimal real-time estimator. It
 - **S (how fast the true rate can change)** is set by *Tap-rate variability* = 100 kg/min per minute. In simulation this setting gives the lowest error, and the **stated 90% interval contains the true rate about 90% of the time**, so the ± is honest.
 - **The 600 kg/min target is *not* used as a prior.** That would pull estimates toward "on target" and make the tool unfair. The expected 300–1500 kg/min range is used only for plausibility checks. The rate must be ≥ 0 because metal can't flow out, and rates above 3000 kg/min are rejected as impossible.
 
+**Is a Kalman filter the best choice?** It was compared with 20 other live estimators on 210 simulated taps of seven kinds ([tools/filter-bench](tools/filter-bench/README.md)). They include window regressions (least squares, Theil–Sen, LOESS, Savitzky–Golay), exponential smoothing (alpha-beta, Holt, Brown) and adaptive or robust Kalman variants (IMM, H-infinity, Student-t, a particle filter, a load-swing model). Each was tuned on separate taps. None was meaningfully better: the best gained 0.05 percentage points. The remaining error (about 6% RMS against the true rate at each moment) comes from the measurements, not the filter. The rate is the slope of a noisy weight shown in 50 kg steps, and the true rate keeps wandering while enough readings for a good slope come in.
+
 ### 3.5 Touches, bounces and misreads: the physics does the work
 **Metal can't leave the crucible**, so a reading well below the mass already established is physically impossible. That means the crucible is resting on the cathode or cell. The established mass is the median of the last 10 s of accepted readings. A reading more than 3.5 σ below it is flagged as **touch** and excluded until the operator lifts the crucible.
 
@@ -263,6 +265,7 @@ node tools/vision-eval.mjs 500 --hot  # ... on over-exposed displays (white core
 node tools/real-debug.mjs photo.jpg out/   # what the reader sees in a real photo (PNG, or JPEG via ffmpeg)
 node tools/sequence-eval.mjs 8 --hard # frame sequences: independent reading vs. with the tracker
 node tools/engine-run.mjs 3           # one simulated tap through the engine
+node tools/filter-bench/run.mjs       # live-rate benchmark: 20 estimators vs the Kalman filter (~3 min)
 node tests/e2e/smoke.mjs out/         # headless Chromium: demo -> history
 node tests/e2e/camera.mjs out/        # fake camera stream -> live session
 node tests/e2e/video.mjs out/         # synthetic video file -> analysis (needs ffmpeg)
