@@ -57,7 +57,10 @@ No App Store, no account, no server. It's a web page you add to the home screen.
 
 **Several pots into one crucible:** if the crane moves to the next pot within 2 minutes, the recording continues. Each pot's tap is detected and reported separately (Tap 1, Tap 2, …).
 
-**Recorded video instead of live:** film the display with the normal Camera app (zoomed in, phone steady), then use Settings → **Analyse a video…**. Frame the digits, then press **Analyse video**. It runs at about 2× real time.
+**Recorded video instead of live:** film the display with the normal Camera app (zoomed in, phone steady), then use Settings → **Analyse a video…**. Frame the digits, then press **Analyse video**. It runs at about 2× real time. For the best footage:
+- Zoom in until the display fills a third to a half of the picture's width, and lean the phone against something.
+- Record in 4K if you can (Settings → Camera → Record Video).
+- If the digits look white rather than red on the phone, press and hold on the display until *AE/AF LOCK* appears, then drag the ☀︎ slider down a little until they look red. Less glow means crisper digits.
 
 **Battery / screen:** the app keeps the screen awake while the camera runs. If your iOS version doesn't, set *Settings → Display & Brightness → Auto-Lock* to a longer time.
 
@@ -77,6 +80,13 @@ Each analysed frame (10 per second) goes through these steps:
 7. The 7 segment regions of each digit are measured and matched to templates. A digit must win by a clear margin.
 
 **Over-exposed displays.** Photographed from the floor, the real scale's digits are so bright that the camera records **white/cream lines inside a red glow**. To the redness image the digits are then holes. A second mode handles this. It reads the white cores that are enclosed by red glow on both sides; a light bezel or a yellow beam next to the display has red on one side at most. The mode switches itself off unless the cores really are white-hot: the green channel reaches about 220 on the real display and about 80 on a normally exposed one. Conversely, red mode refuses digits with white-hot cores and leaves them to this mode. In red terms it is the glow that is lit, and the glow around a "3" can fill in an "8". In *Auto*, the reader tries red digits, then over-exposed, then any bright digits, starting with whichever worked last.
+
+**How much glow?** That depends on the exposure. In a 1080p video of the real scale (digits about 33 px tall) the glow is so heavy that at the usual threshold a "5" looks like a "9" and the digits run together; only the hottest part of each stroke still has its true shape. So when the usual threshold gives no reading, over-exposed digits are read again at higher thresholds: 60–90% of the way from the background to the brightest cores instead of 50%.
+- A value counts only when two thresholds read it and none reads anything else. A misread caused by the glow, or by a dim stroke dropping out (a "4" whose left half fades looks like a "1"), comes and goes with the threshold; the true value stays.
+- A "1" read above the usual threshold must also have the rest of its cell dark at the usual threshold.
+- The thresholds that agreed are tried first on the next frame, so a steady view costs two extra reads, not seven.
+
+**Framing.** The crop's size and scale come from the red area found, which may or may not take in the glow or the window around the digits, so they change with how tightly the display is framed (and the thresholds come from the background the crop holds). A crop of over-exposed digits that gave no reading is read once more with more background around it and its digits at the usual height. A second chance is also a second chance to misread, so there even a reading at the usual threshold needs a second threshold to agree.
 
 Two more things the real display does:
 - **A bright line under the digits.** The window's lower lip reflects the glow as a thin line touching every digit, which glues the whole number into one shape.
@@ -99,7 +109,7 @@ A reading is accepted only if it lies in the plausible range and is a multiple o
 - No digit may have half-lit segments.
 - "Any bright digits" mode needs a clearer win.
 
-**The reader prefers "no reading" to a wrong reading.** It was tested on 4,600 synthetic frames: blur, glow, glare, ghost segments, tilt, 12–70 px digits, indicator LEDs, clutter, and over-exposed displays modelled on photos of the real scale. It reads about 93% of normal frames, 87% of deliberately hard ones and 91% of over-exposed ones, with **no wrong values**. In 3,600 frames of simulated taps neither the single-frame reader nor the tracker gave a wrong value. The steps below would also catch an isolated misread: the reading history (next section), 0.5 s medians and the Kalman gate.
+**The reader prefers "no reading" to a wrong reading.** It was tested on 4,600 synthetic frames: blur, glow, glare, ghost segments, tilt, 12–70 px digits, indicator LEDs, clutter, and over-exposed displays modelled on photos of the real scale. It reads about 93% of normal frames, 88% of deliberately hard ones and 93% of over-exposed ones, with **no wrong values**. In 3,600 frames of simulated taps neither the single-frame reader nor the tracker gave a wrong value. On the real scale it reads 9 of 10 photos and 135 of the 150 frames of a 15 s, 1080p video (138 with the reading history); the rest are refused and none is misread. Crops of these photos and video frames are part of the tests. The steps below would also catch an isolated misread: the reading history (next section), 0.5 s medians and the Kalman gate.
 
 ### 3.2 Each reading is checked against the previous ones
 Frames arrive about 10 times a second and the weight changes slowly. So each new frame is judged against what the last readings predict: the median of the last 7 accepted readings plus the current trend. The band around that prediction is sized from the jitter seen in recent frames (±3 to ±10 display steps).
@@ -214,6 +224,7 @@ js/analysis/offline.js     per-tap results after a recording
 js/analysis/sim.js         realistic tap simulator (noise, swing, touches, misreads)
 js/vision/render7seg.js    synthetic seven-segment renderer (tests, demo, icons)
 tests/                     node --test unit tests;  tests/e2e/ Playwright end-to-end
+tests/fixtures/real/       crops of photos and video frames of the real scale (with the values shown)
 tools/                     vision evaluation/debug, test video, icons, local server
 ```
 
@@ -221,7 +232,7 @@ tools/                     vision evaluation/debug, test video, icons, local ser
 npm test                              # unit tests (vision accuracy, statistics, engine on simulated taps)
 node tools/vision-eval.mjs 500 --hard # Monte-Carlo read-rate / wrong-read check (single frames)
 node tools/vision-eval.mjs 500 --hot  # ... on over-exposed displays (white cores in red glow, LEDs)
-node tools/real-debug.mjs photo.jpg out/   # what the reader sees in a real photo (needs ffmpeg)
+node tools/real-debug.mjs photo.jpg out/   # what the reader sees in a real photo (PNG, or JPEG via ffmpeg)
 node tools/sequence-eval.mjs 8 --hard # frame sequences: independent reading vs. with the tracker
 node tools/engine-run.mjs 3           # one simulated tap through the engine
 node tests/e2e/smoke.mjs out/         # headless Chromium: demo -> history

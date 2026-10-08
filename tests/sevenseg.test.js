@@ -196,3 +196,16 @@ test('a bright line along the bottom of the window does not glue the digits toge
   assert.equal(wrong, 0);
   assert.ok(ok / N >= 0.75, `read rate ${ok}/${N}`);
 });
+
+test('read above the usual threshold, a 4 or 7 whose dim strokes dropped out is not taken for a 1', () => {
+  // over-exposed scenes that one higher threshold alone read as 23150, 20150, 25100,
+  // 25150 and 21900 (a 4 or 7 without its fainter strokes looks like a "1")
+  for (const [seed, relThr] of [[93, 0.85], [120, 0.65], [319, 0.65], [447, 0.7], [229, 0.8]]) {
+    const { W, H, opts } = hotScene(seed);
+    const buf = new Uint8ClampedArray(W * H * 4);
+    renderDisplay(buf, W, H, opts);
+    const crop = readFrame(makeSampler(buf, W, H), W, H, { x: 0, y: 0, w: W, h: H }, { colorMode: 'hot', keepDebug: true, hotThresholds: [] }).debug.read;
+    const r = readDigits(crop.img, crop.w, crop.h, { colorMode: 'hot', relThr, refRelThr: 0.5, maxDigits: 5 });
+    assert.equal(r.ok, false, `seed ${seed}: read ${r.text}`);
+  }
+});

@@ -60,6 +60,10 @@ export const READ_DEFAULTS = {
   maxWidthRatio: 1.22, // a digit this much wider than the others is two glued together
   maxHotFrac: 0.03,    // red mode: share of white-hot core pixels in the digits above which
                        // they are over-exposed and left to "hot" mode
+  refRelThr: 0,        // reading above the usual threshold (relThr > this): the usual one,
+                       // where what looks empty must be empty too (0 = not used)
+  cache: null,         // {} shared by reads of one crop in one colour mode at several
+                       // thresholds (keeps the score image)
   keepMask: false,
 };
 
@@ -272,8 +276,12 @@ export function readDigits(rgba, w, h, opts = {}) {
   const fail = (why) => { res.reason = why; return res; };
   if (w < 8 || h < 8) return fail('tiny');
 
-  const raw = o.colorMode === 'hot' ? hotScore(rgba, w, h) : scoreImage(rgba, n, o.colorMode, o.strictness);
-  const sm = blur3(raw, w, h);
+  const cache = o.cache || {};
+  if (!cache.sm) {
+    const raw = o.colorMode === 'hot' ? hotScore(rgba, w, h) : scoreImage(rgba, n, o.colorMode, o.strictness);
+    cache.sm = blur3(raw, w, h);
+  }
+  const sm = cache.sm;
   const th = adaptiveThreshold(sm, n, o);
   res.threshold = th.T; res.contrast = th.contrast;
   if (o.keepMask) res.mask = { data: sm, w, h, T: th.T };
@@ -777,6 +785,23 @@ export function readDigits(rgba, w, h, opts = {}) {
     let lit = 0;
     for (let col = c0; col <= c1; col++) lit += colHist[col];
     if (lit * stride > 0.04 * H * H) return fail('1-not-alone');
+    // Read at a higher threshold than usual (to see the cores through a heavy glow),
+    // the dimmer strokes of a 4 or 7 can drop out and leave what looks like a "1":
+    // the rest of its cell must be dark at the usual threshold too (clear of the
+    // stroke's own glow, which is wider there).
+    if (o.refRelThr && o.refRelThr < o.relThr) {
+      const Tref = adaptiveThreshold(sm, n, { ...o, relThr: o.refRelThr }).T;
+      const vA = top + (lineAbove ? 0.12 * H : 0), vB = bottom - (lineBelow ? 0.12 * H : 0);
+      let dim = 0;
+      for (let vv = vA; vv <= vB; vv++) {
+        for (let uu = g.umax + 1 - 0.85 * Wt; uu <= g.umin - Math.max(2, 0.12 * H); uu++) {
+          const [x, y] = toOrig(uu, vv);
+          const xi = Math.round(x), yi = Math.round(y);
+          if (xi >= 0 && yi >= 0 && xi < w && yi < h && sm[yi * w + xi] > Tref) dim++;
+        }
+      }
+      if (dim > 0.015 * H * H) return fail('1-not-alone');
+    }
     for (const e of res.extras) {
       const vc = (e.v0 + e.v1) / 2, ew = e.u1 - e.u0 + 1, eh = e.v1 - e.v0 + 1;
       if (vc < top + 0.4 * H && e.u1 <= g.umin + 1 && e.u1 >= g.umin - 0.25 * Wt && ew >= 0.8 * eh) return fail('fragment-1');
@@ -846,7 +871,7 @@ export function readDigits(rgba, w, h, opts = {}) {
       // still glows red, so hot mode checks the redness.
       let chk = sm, chkT = th.p50 + 0.2 * th.contrast;
       if (o.colorMode === 'hot') {
-        chk = blur3(scoreImage(rgba, n, 'red', 1), w, h);
+        chk = cache.red ||= blur3(scoreImage(rgba, n, 'red', 1), w, h);
         const t2 = adaptiveThreshold(chk, n, o);
         chkT = t2.p50 + 0.3 * t2.contrast;
       }

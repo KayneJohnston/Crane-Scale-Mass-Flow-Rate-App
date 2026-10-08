@@ -1,19 +1,25 @@
-// Run the reader on a real photo and dump what it sees (needs ffmpeg for JPEG/PNG).
-//   node tools/real-debug.mjs <photo.jpg | file.rgba width height> [outDir] [x y w h]
+// Run the reader on a real photo and dump what it sees (8-bit PNG directly; JPEG and
+// other images need ffmpeg).
+//   node tools/real-debug.mjs <photo.png | photo.jpg | file.rgba width height> [outDir] [x y w h]
 // CFG='{"colorMode":"hot"}' overrides reader settings.
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { makeSampler } from '../js/vision/sampler.js';
 import { readFrame } from '../js/vision/pipeline.js';
 import { locateDisplay } from '../js/vision/sevenseg.js';
-import { encodePNG } from './png.js';
+import { encodePNG, decodePNG } from './png.js';
 
 const args = process.argv.slice(2);
 const file = args.shift();
 let w, h, buf;
+const png = (() => {
+  try { return file.endsWith('.png') ? decodePNG(readFileSync(file)) : null; } catch { return null; } // e.g. 16-bit
+})();
 if (file.endsWith('.rgba')) {
   w = +args.shift(); h = +args.shift();
   buf = new Uint8ClampedArray(readFileSync(file).buffer);
+} else if (png) {
+  ({ width: w, height: h, data: buf } = png);
 } else {
   // ffmpeg applies the photo's EXIF rotation, so the image is upright as on the phone
   [w, h] = execFileSync('ffprobe', ['-v', 'error', '-select_streams', 'v:0', '-show_entries', 'stream=width,height', '-of', 'csv=p=0', file]).toString().trim().split(',').map(Number);
