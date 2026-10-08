@@ -70,20 +70,27 @@ Each analysed frame (10 per second) goes through these steps:
 
 1. A *redness* image is computed (R − max(G, B)), which rejects white glare, and the area is downscaled.
 2. The display is located as a row of red blobs.
-3. A tight crop is taken at full camera resolution and rescaled so digits are about 48 px tall.
+3. A crop is taken at full camera resolution, one digit-width wider than the digits on each side, and rescaled so digits are about 48 px tall.
 4. The crop is thresholded halfway between background and segment brightness, which is the edge of a blurred stroke.
 5. Hand-held tilt and the italic slant are removed by maximising the sharpness of the row and column projections.
-6. The digit row is split into digits, using the fact that the display must show exactly as many digits as the plausible range implies (5 for 10,000–30,000 kg).
+6. The digit row is cut into digits by *segmentation by recognition*: every plausible way to cut it is scored by how well the pieces read as digits. Once the app has locked on to the readings it knows how many digits to expect. Before that, the plausible range (1,000–40,000 kg) allows 4 or 5.
 7. The 7 segment regions of each digit are measured and matched to templates. A digit must win by a clear margin.
 
-A reading is accepted only if it has the right number of digits, lies in the plausible range, and is a multiple of 50 kg. Several sanity checks also apply:
+**Over-exposed displays.** Photographed from the floor, the real scale's digits are so bright that the camera records **white/cream lines inside a red glow**. To the redness image the digits are then holes. A second mode handles this. It reads the white cores that are enclosed by red glow on both sides; a light bezel or a yellow beam next to the display has red on one side at most. The mode switches itself off unless the cores really are white-hot: the green channel reaches about 220 on the real display and about 80 on a normally exposed one. Conversely, red mode refuses digits with white-hot cores and leaves them to this mode. In red terms it is the glow that is lit, and the glow around a "3" can fill in an "8". In *Auto*, the reader tries red digits, then over-exposed, then any bright digits, starting with whichever worked last.
 
+A reading is accepted only if it lies in the plausible range and is a multiple of 50 kg, plus these checks:
+
+- **No digit is ever silently dropped.**
+  - Indicator LEDs and the decimal point are left out of the number only when they sit off the digit pitch. Every digit, "1" included, is right-aligned on that pitch.
+  - A 4-digit reading such as 3,050 is accepted only if the cells on both sides of it are in view and empty, even of faint light. Numbers are right-aligned, so only the decimal point (low down) may sit to the right.
+  - A digit clearly wider than a full digit cell is two digits glued together by glow. A "1" stuck to a "6" would turn 16,500 into 6,500, so the frame is refused.
+- **Snapping to valid values.** The display can only show multiples of 50 kg, so the tens digit must be 0 or 5 and the last digit 0. When a digit is ambiguous on its own (a smudged "5" that could be a "3"), the reader takes the most likely *valid* number. It does this only if that number clearly beats every other valid number, and only to settle an ambiguity. If the last digit clearly looks like an 8, the picture can't be trusted (unlit segments showing through, say), so the frame is refused, not "corrected".
 - The digits must sit on an evenly spaced pitch.
-- A "1" must have an empty cell to its left.
+- A "1" must be a straight column with the rest of its cell empty. A "7" whose top bar is only partly visible is refused, not read as a "1".
 - No digit may have half-lit segments.
 - "Any bright digits" mode needs a clearer win.
 
-**The reader prefers "no reading" to a wrong reading.** On 5,000 synthetic frames (blur, glow, glare, ghost segments, over-exposure, tilt, 12–70 px digits, indicator LEDs, clutter) it reads about 91% of normal and 85% of deliberately hard frames. There was **1 wrong value in 5,000**: a red object painted over part of a digit. The steps below still catch isolated misreads: 0.5 s medians and the Kalman gate.
+**The reader prefers "no reading" to a wrong reading.** It was tested on 4,600 synthetic frames: blur, glow, glare, ghost segments, tilt, 12–70 px digits, indicator LEDs, clutter, and over-exposed displays modelled on photos of the real scale. It reads about 93% of normal frames, 87% of deliberately hard ones and 91% of over-exposed ones, with **no wrong values**. In 3,600 frames of simulated taps neither the single-frame reader nor the tracker gave a wrong value. The steps below would also catch an isolated misread: the reading history (next section), 0.5 s medians and the Kalman gate.
 
 ### 3.2 Each reading is checked against the previous ones
 Frames arrive about 10 times a second and the weight changes slowly. So each new frame is judged against what the last readings predict: the median of the last 7 accepted readings plus the current trend. The band around that prediction is sized from the jitter seen in recent frames (±3 to ±10 display steps).
@@ -155,9 +162,9 @@ The vision was developed on a realistic simulator, so real footage will improve 
 
 Settings that may matter:
 
-- **Digit colour:** *Auto* tries red, then any bright digit.
-- **Red strictness:** lower it if the digits look white or pink on screen, i.e. over-exposed.
-- **Plausible range:** this also sets the digit count, 5 for 10,000–30,000 kg.
+- **Digit colour:** *Auto* (recommended) tries red digits, then *over-exposed* (white digits in a red glow, which is how the real display photographs), then any bright digit.
+- **Red strictness:** lower it if the digits look pink on screen in *Red digits* mode.
+- **Plausible range:** 1,000–40,000 kg by default, so lighter loads (like the 3,050 kg in the test photos) read too. If you only ever measure taps, narrowing it to 10,000–30,000 makes the reader expect exactly 5 digits, which is slightly more robust.
 - **Display shows:** choose this if the display shows tonnes with a decimal point.
 
 ---
@@ -204,6 +211,8 @@ tools/                     vision evaluation/debug, test video, icons, local ser
 ```bash
 npm test                              # unit tests (vision accuracy, statistics, engine on simulated taps)
 node tools/vision-eval.mjs 500 --hard # Monte-Carlo read-rate / wrong-read check (single frames)
+node tools/vision-eval.mjs 500 --hot  # ... on over-exposed displays (white cores in red glow, LEDs)
+node tools/real-debug.mjs photo.jpg out/   # what the reader sees in a real photo (needs ffmpeg)
 node tools/sequence-eval.mjs 8 --hard # frame sequences: independent reading vs. with the tracker
 node tools/engine-run.mjs 3           # one simulated tap through the engine
 node tests/e2e/smoke.mjs out/         # headless Chromium: demo -> history

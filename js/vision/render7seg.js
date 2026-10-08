@@ -22,16 +22,21 @@ export const RENDER_DEFAULTS = {
   rotDeg: 0,           // in-plane rotation of the whole display
   bg: [14, 14, 16],
   panel: true, panelColor: [26, 22, 24], panelPad: 0.35,
+  panelPadL: null, panelPadR: null,   // optional asymmetric horizontal padding (default panelPad)
   lit: [255, 38, 28],
   ghost: 0, ghostColor: [80, 16, 14],   // visibility of unlit segments (0..1)
   hot: 0,              // over-exposed whitish segment cores (0..1)
   glow: 0.35, glowRadius: 0.07,
+  glowColor: null,     // colour of the glow (default: the lit colour). Over-exposed displays:
+                       // lit = cream core, glowColor = saturated red bloom
+  bezel: null,         // {color:[r,g,b], width} light frame around the display window
   blur: 0,             // optical blur radius in px
   noise: 4,            // gaussian sensor noise (std, 0..255 scale)
   gain: 1,
   glare: [],           // [{x, y, r, i}] additive white blobs (x,y,r in px)
   clutter: [],         // [{x, y, r, color:[r,g,b]}] solid discs elsewhere in the scene
   dp: -1,              // index of the digit followed by a decimal point (-1 = none)
+  leds: [],            // [{u, v, r}] lit indicator dots, in digit heights from the top-left of the first cell
   seed: 1,
 };
 
@@ -179,6 +184,14 @@ export function renderDisplay(buf, W, H, opts = {}) {
       fillConvex(lit, W, H, [[x, y], [x + s, y], [x + s, y + s], [x, y + s]].map(([a, b]) => toImg(a, b)));
     }
   }
+  for (const d of o.leds) {
+    const pts = [];
+    for (let k = 0; k < 12; k++) {
+      const a = (k / 12) * 2 * Math.PI;
+      pts.push(toImg((d.u + d.r * Math.cos(a)) * Hd, (d.v + d.r * Math.sin(a)) * Hd));
+    }
+    fillConvex(lit, W, H, pts);
+  }
   if (o.blur >= 1) { boxBlurFloat(lit, W, H, Math.round(o.blur)); boxBlurFloat(ghost, W, H, Math.round(o.blur)); }
   let glowL = null;
   if (o.glow > 0) {
@@ -186,14 +199,18 @@ export function renderDisplay(buf, W, H, opts = {}) {
     boxBlurFloat(glowL, W, H, Math.max(1, Math.round(o.glowRadius * Hd)), 3);
   }
 
-  const padX = totalW / 2 + Hd * o.panelPad + Hd * tanS / 2, padY = Hd / 2 + Hd * o.panelPad;
+  const padX = totalW / 2 + Hd * tanS / 2, padY = Hd / 2 + Hd * o.panelPad;
+  const padL = padX + Hd * (o.panelPadL ?? o.panelPad), padR = padX + Hd * (o.panelPadR ?? o.panelPad);
+  const glowC = o.glowColor || o.lit;
+  const bz = o.bezel ? o.bezel.width * Hd : 0;
   for (let y = 0, i = 0, p = 0; y < H; y++) {
     for (let x = 0; x < W; x++, i++, p += 4) {
       let r = o.bg[0], gg = o.bg[1], b = o.bg[2];
       if (o.panel) {
         const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
         const lx = dx * cr + dy * sr, ly = -dx * sr + dy * cr;
-        if (Math.abs(lx) <= padX && Math.abs(ly) <= padY) { r = o.panelColor[0]; gg = o.panelColor[1]; b = o.panelColor[2]; }
+        if (lx >= -padL && lx <= padR && Math.abs(ly) <= padY) { r = o.panelColor[0]; gg = o.panelColor[1]; b = o.panelColor[2]; }
+        else if (bz && lx >= -padL - bz && lx <= padR + bz && Math.abs(ly) <= padY + bz) { r = o.bezel.color[0]; gg = o.bezel.color[1]; b = o.bezel.color[2]; }
       }
       for (const c of o.clutter) {
         const d2 = (x - c.x) ** 2 + (y - c.y) ** 2;
@@ -204,7 +221,7 @@ export function renderDisplay(buf, W, H, opts = {}) {
       const lv = lit[i] * o.gain;
       r += lv * o.lit[0]; gg += lv * o.lit[1]; b += lv * o.lit[2];
       if (o.hot > 0) { const h2 = lit[i] * lit[i] * o.hot; gg += h2 * 190; b += h2 * 180; }
-      if (glowL) { const gl = glowL[i] * o.glow; r += gl * o.lit[0]; gg += gl * o.lit[1]; b += gl * o.lit[2]; }
+      if (glowL) { const gl = glowL[i] * o.glow; r += gl * glowC[0]; gg += gl * glowC[1]; b += gl * glowC[2]; }
       for (const gl of o.glare) {
         const d2 = (x - gl.x) ** 2 + (y - gl.y) ** 2;
         const v = gl.i * Math.exp(-d2 / (2 * gl.r * gl.r));

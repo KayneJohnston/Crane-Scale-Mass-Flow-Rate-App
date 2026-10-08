@@ -41,7 +41,7 @@ const HORIZ = [0, 3, 6];
 const VERT = [1, 2, 4, 5];
 
 export const READ_DEFAULTS = {
-  colorMode: 'red',   // 'red' | 'bright'
+  colorMode: 'red',   // 'red' | 'hot' (over-exposed: white cores in red glow) | 'bright'
   strictness: 1,      // red score = R - strictness * max(G, B)
   minContrast: 30,
   minLevel: 25,
@@ -55,6 +55,11 @@ export const READ_DEFAULTS = {
   maxCost: 1.7,
   minMargin: 0.6,
   expectDigits: 0,     // digits the display must show (0 = unknown); guides segmentation
+  maxDigits: 0,        // most digits a valid reading can have (0 = unknown): with fewer, the
+                       // cell left of the number must be empty
+  maxWidthRatio: 1.22, // a digit this much wider than the others is two glued together
+  maxHotFrac: 0.03,    // red mode: share of white-hot core pixels in the digits above which
+                       // they are over-exposed and left to "hot" mode
   keepMask: false,
 };
 
@@ -87,6 +92,69 @@ export function scoreImage(rgba, n, mode = 'red', strictness = 1, out) {
     }
   }
   return o;
+}
+
+/**
+ * Score for over-exposed displays ("hot" mode). A camera that exposes for the
+ * dim surroundings saturates bright red LEDs: each segment shows as a thin
+ * cream/white core inside a wide red bloom, and the bloom fills the whole digit
+ * area - so in "red" terms the digits are holes. Here the cores are found with
+ * the green channel (core ~220, red bloom ~50), keeping only pixels that are
+ * enclosed by red glow on both sides (above and below, or left and right). A
+ * grey bezel edge touching the glowing window, or a yellow beam next to the
+ * display, has red on one side at most and is ignored. Only a display that really
+ * is over-exposed has white-hot cores (green ~220 in the photos of the real scale,
+ * ~80 for a normally exposed red display): below `minCore` nothing is returned.
+ */
+export function hotScore(rgba, w, h, minCore = 120) {
+  const n = w * h;
+  const red = new Uint8Array(n);
+  const hist = new Uint32Array(256);
+  const rs = new Uint8ClampedArray(n);
+  for (let i = 0, p = 0; i < n; i++, p += 4) {
+    const g = rgba[p + 1], b = rgba[p + 2];
+    const v = rgba[p] - (g > b ? g : b);
+    rs[i] = v > 0 ? v : 0;
+    hist[rs[i]]++;
+  }
+  // "strong red" = at least 40% of the level the reddest 2% of pixels reach, and
+  // clearly redder than the typical pixel (dark red window, brownish surroundings)
+  let pHi = 255;
+  for (let acc = 0, need = Math.max(8, 0.02 * n); pHi > 0; pHi--) { acc += hist[pHi]; if (acc >= need) break; }
+  const p50 = histQuantile(hist, n, 0.5);
+  const T = Math.max(40, 0.4 * pHi, p50 + 0.35 * (pHi - p50));
+  for (let i = 0; i < n; i++) red[i] = rs[i] > T ? 1 : 0;
+  // prefix sums of the red mask along rows and columns
+  const rowP = new Int32Array(n + h), colP = new Int32Array(n + w);
+  for (let y = 0; y < h; y++) {
+    const r0 = y * (w + 1);
+    for (let x = 0; x < w; x++) rowP[r0 + x + 1] = rowP[r0 + x] + red[y * w + x];
+  }
+  for (let x = 0; x < w; x++) {
+    const c0 = x * (h + 1);
+    for (let y = 0; y < h; y++) colP[c0 + y + 1] = colP[c0 + y] + red[y * w + x];
+  }
+  const rowSum = (y, a, b) => (b < a ? 0 : rowP[y * (w + 1) + b + 1] - rowP[y * (w + 1) + a]);
+  const colSum = (x, a, b) => (b < a ? 0 : colP[x * (h + 1) + b + 1] - colP[x * (h + 1) + a]);
+  const d = Math.max(3, Math.round(0.08 * h));
+  const out = new Uint8ClampedArray(n);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      const g = rgba[i * 4 + 1];
+      if (g < 60) continue;
+      const lr = rowSum(y, Math.max(0, x - d), x - 1) > 0 && rowSum(y, x + 1, Math.min(w - 1, x + d)) > 0;
+      const ud = lr || (colSum(x, Math.max(0, y - d), y - 1) > 0 && colSum(x, y + 1, Math.min(h - 1, y + d)) > 0);
+      if (ud) out[i] = g;
+    }
+  }
+  // core level: what the brightest 0.4% of the crop reaches
+  const oh = new Uint32Array(256);
+  for (let i = 0; i < n; i++) oh[out[i]]++;
+  let core = 255;
+  for (let acc = 0, need = Math.max(4, 0.004 * n); core > 0; core--) { acc += oh[core]; if (acc >= need) break; }
+  if (core < minCore) out.fill(0);
+  return out;
 }
 
 // 3x3 box blur (edge-replicated), Uint8 -> Uint8.
@@ -204,7 +272,8 @@ export function readDigits(rgba, w, h, opts = {}) {
   const fail = (why) => { res.reason = why; return res; };
   if (w < 8 || h < 8) return fail('tiny');
 
-  const sm = blur3(scoreImage(rgba, n, o.colorMode, o.strictness), w, h);
+  const raw = o.colorMode === 'hot' ? hotScore(rgba, w, h) : scoreImage(rgba, n, o.colorMode, o.strictness);
+  const sm = blur3(raw, w, h);
   const th = adaptiveThreshold(sm, n, o);
   res.threshold = th.T; res.contrast = th.contrast;
   if (o.keepMask) res.mask = { data: sm, w, h, T: th.T };
@@ -361,9 +430,12 @@ export function readDigits(rgba, w, h, opts = {}) {
     };
     const a = colStart[Math.max(0, c0)], b = colStart[Math.min(usize, c1 + 1)];
     const rows = new Uint8Array(rowsN);
+    g.uTop = Infinity; g.uMid = Infinity; // left edge of the top rows / of the upper stroke
     for (let j = a; j < b; j++) {
       const i = order[j];
       g.cnt++;
+      const dv = v[i] - top;
+      if (dv < 0.2 * H) { if (u[i] < g.uTop) g.uTop = u[i]; } else if (dv >= 0.25 * H && dv <= 0.45 * H && u[i] < g.uMid) g.uMid = u[i];
       if (v[i] < g.vmin) g.vmin = v[i]; if (v[i] > g.vmax) g.vmax = v[i];
       if (u[i] < g.umin) g.umin = u[i]; if (u[i] > g.umax) g.umax = u[i];
       const ox = px[i] + cx, oy = py[i] + cy;
@@ -375,7 +447,22 @@ export function readDigits(rgba, w, h, opts = {}) {
     g.w = g.umax - g.umin + 1;
     g.h = g.vmax - g.vmin + 1;
     g.mass = g.cnt * stride;
+    // indicator LEDs (often a stacked pair, ":") look like a narrow piece made of short
+    // blobs - but so does a thick "1" (two short strokes): such a piece may be either
+    let longest = 0;
+    for (let r = 0, run = 0; r < rowsN; r++) { run = rows[r] ? run + 1 : 0; if (run > longest) longest = run; }
+    g.longest = longest;
+    g.dotsLike = g.w <= 0.45 * H && longest <= Math.max(0.3 * H, Math.min(0.38 * H, 1.2 * g.w));
     g.isGlyph = g.h >= 0.5 * H && g.mass >= 0.012 * H * H;
+    if (g.isGlyph) {
+      // A digit ends at its rightmost vertical stroke (every digit has b or c), so a
+      // decimal point or a reflection glued on its right neither stretches the
+      // template nor shifts the digit off the pitch.
+      let cR = Math.min(usize - 1, c1);
+      while (cR > c0 && colHist[cR] < (0.2 * H) / stride) cR--;
+      const uR = cR + umin + 0.5;
+      if (uR < g.umax && uR - g.umin + 1 >= 0.15 * H) { g.umax = uR; g.w = g.umax - g.umin + 1; }
+    }
     // longest continuous vertical stroke in the upper and lower half (a "1" has one in each)
     let run = 0, best = 0;
     for (let r = 1; r <= half; r++) { run = rows[r] ? run + 1 : 0; if (run > best) best = run; }
@@ -418,8 +505,17 @@ export function readDigits(rgba, w, h, opts = {}) {
   const classify = (g) => {
     g.narrow = g.w < 0.6 * Wt && g.w < 0.36 * H;
     if (g.narrow) {
-      // a "1" is two vertical segments: both halves present and (nearly) full height
-      const ok = g.cu >= 0.45 && g.cl >= 0.45 && g.extent >= 0.6;
+      // a "1" is two vertical segments: both halves present and (nearly) full height,
+      // right-aligned in its cell with the rest of the cell dark (half of a "0" cut
+      // off by a bad split is a narrow stroke too, but its other half is right there)
+      const c0 = Math.max(0, Math.round(g.umax + 1 - 0.85 * Wt - umin)), c1 = Math.round(g.umin - umin) - 2;
+      let lit = 0;
+      for (let col = c0; col <= c1; col++) lit += colHist[col];
+      g.alone = lit * stride <= 0.04 * H * H;
+      // ... and it is a straight column: a bar sticking out at its top-left is what is
+      // left of a "7" whose top bar is only partly visible
+      g.topBar = g.uMid - g.uTop > Math.max(2, 0.1 * H);
+      const ok = g.cu >= 0.45 && g.cl >= 0.45 && g.extent >= 0.6 && g.alone && !g.topBar;
       g.ch = '1';
       g.cost = ok ? 0.3 * (2 - g.cu - g.cl) : 3;
       g.margin = ok ? 1 : 0;
@@ -472,11 +568,18 @@ export function readDigits(rgba, w, h, opts = {}) {
   const SPLIT_PENALTY = 0.8, DOT = 0.02 * H * H, MAXK = 4;
   const trigger = Math.max(0.62 * H, 1.12 * Wt);
   const memo = new Map();
-  const leafCost = (g) => {
-    if (!g.cnt) return { k: 0, cost: 0 };
-    if (g.isGlyph) { classify(g); return { k: 1, cost: g.cost + (g.good ? 0 : 2) }; }
+  // ways to read one piece: [{k, cost, part}] (k = 1 as a digit, k = 0 left out)
+  const leafOpts = (g) => {
+    if (!g.cnt) return [{ k: 0, cost: 0, part: g }];
     // a dot at the bottom is a decimal point (cheap); one higher up may be a cut-off bar
-    return { k: 0, cost: g.mass >= DOT ? 2 : (g.vmin + g.vmax) / 2 > top + 0.6 * H ? 0.3 : 1 };
+    const dotCost = g.mass >= DOT ? 2 : (g.vmin + g.vmax) / 2 > top + 0.6 * H ? 0.3 : 1;
+    if (!g.isGlyph) return [{ k: 0, cost: dotCost, part: g }];
+    classify(g);
+    const out = [{ k: 1, cost: g.cost + (g.good ? 0 : 2), part: g }];
+    // a glyph-sized piece of round blobs may be indicator LEDs: it can be left out, but
+    // the position check below makes sure no digit of the number is dropped this way
+    if (g.dotsLike) out.push({ k: 0, cost: dotCost, part: { ...g, isGlyph: false } });
+    return out;
   };
   // options(c0, c1) -> Map(k -> {cost, parts}): best way to read columns c0..c1 as k glyphs
   const options = (c0, c1, depth) => {
@@ -484,8 +587,7 @@ export function readDigits(rgba, w, h, opts = {}) {
     if (memo.has(key)) return memo.get(key);
     const out = new Map();
     const g = measure(c0, c1);
-    const lc = leafCost(g);
-    out.set(lc.k, { cost: lc.cost, parts: [g] });
+    for (const lc of leafOpts(g)) if (!out.has(lc.k) || lc.cost < out.get(lc.k).cost) out.set(lc.k, { cost: lc.cost, parts: [lc.part] });
     const wid = c1 - c0 + 1;
     if (wid > trigger && wid >= 6 && depth <= 3) {
       const lo = c0 + Math.max(1, Math.floor(0.12 * wid)), hi = c1 - Math.max(1, Math.floor(0.12 * wid));
@@ -541,8 +643,38 @@ export function readDigits(rgba, w, h, opts = {}) {
     }
   }
   const pieces = choice ? choice.parts : G;
-  const glyphs = pieces.filter((g) => g.cnt && g.isGlyph).sort((a, b) => a.umin - b.umin);
-  for (const g of pieces) if (g.cnt && !g.isGlyph) res.extras.push({ u0: g.umin, u1: g.umax, v0: g.vmin, v1: g.vmax, mass: g.mass });
+  if (o.keepMask) res.seg = { H, Wt, runs: G.map((g) => [Math.round(g.umin), Math.round(g.umax), +(g.w / H).toFixed(2)]), pieces: pieces.map((p) => [Math.round(p.umin), Math.round(p.umax), +((p.w || 0) / H).toFixed(2), p.isGlyph ? 'G' : '.', +((p.h || 0) / H).toFixed(2), +((p.longest || 0) / H).toFixed(2), +(p.cu ?? 0).toFixed(2), +(p.cl ?? 0).toFixed(2)]) };
+  let glyphs = pieces.filter((g) => g.cnt && g.isGlyph).sort((a, b) => a.umin - b.umin);
+  const extra = (g) => ({ u0: g.umin, u1: g.umax, v0: g.vmin, v1: g.vmax, mass: g.mass, cu: g.cu, cl: g.cl });
+  for (const g of pieces) if (g.cnt && !g.isGlyph) res.extras.push(extra(g));
+  // Digits sit on a fixed pitch and are right-aligned in their cells ("1" included),
+  // so their right edges are evenly spaced.
+  const fitPitch = (gs) => {
+    const n = gs.length, R = gs.map((g) => g.umax);
+    const im = (n - 1) / 2, rm = R.reduce((a, b) => a + b, 0) / n;
+    let sxy = 0, sxx = 0;
+    for (let i = 0; i < n; i++) { sxy += (i - im) * (R[i] - rm); sxx += (i - im) ** 2; }
+    const P = sxy / sxx;
+    let worst = 0;
+    for (let i = 0; i < n; i++) worst = Math.max(worst, Math.abs(R[i] - (rm + P * (i - im))));
+    return { P, worst, ok: P >= 0.55 * H && P <= 1.4 * H && worst <= Math.max(2, 0.14 * P) };
+  };
+  // A piece of round blobs at either end of the row that is off that pitch is a pair
+  // of indicator LEDs, not a "1": leave it out of the number.
+  for (let moved = true; moved && glyphs.length >= 4;) {
+    moved = false;
+    for (const g of [glyphs[0], glyphs[glyphs.length - 1]]) {
+      if (!g.dotsLike) continue;
+      const rest = glyphs.filter((x) => x !== g), f = fitPitch(rest);
+      if (!f.ok) continue;
+      const k = g === glyphs[0] ? (rest[0].umax - g.umax) / f.P : (g.umax - rest[rest.length - 1].umax) / f.P;
+      if (Math.abs(k - 1) <= 0.3) continue;
+      glyphs = rest;
+      res.extras.push(extra(g));
+      moved = true;
+      break;
+    }
+  }
   if (!glyphs.length) return fail('no-glyphs');
   for (const g of glyphs) {
     if (g.xmin <= 1 || g.xmax >= w - 2 || g.ymin <= 0 || g.ymax >= h - 1) return fail('edge');
@@ -578,19 +710,101 @@ export function readDigits(rgba, w, h, opts = {}) {
     }
   }
 
-  // Digits sit on a fixed pitch and are right-aligned in their cells ("1" included),
-  // so the right edges must be evenly spaced. An irregular set means the row was
-  // cut into the wrong pieces.
+  // Irregularly spaced digits mean the row was cut into the wrong pieces.
   if (glyphs.length >= 3) {
-    const n = glyphs.length, R = glyphs.map((g) => g.umax);
-    const im = (n - 1) / 2, rm = R.reduce((a, b) => a + b, 0) / n;
-    let sxy = 0, sxx = 0;
-    for (let i = 0; i < n; i++) { sxy += (i - im) * (R[i] - rm); sxx += (i - im) ** 2; }
-    const P = sxy / sxx;
-    let worst = 0;
-    for (let i = 0; i < n; i++) worst = Math.max(worst, Math.abs(R[i] - (rm + P * (i - im))));
-    res.pitch = P / H;
-    if (P < 0.55 * H || P > 1.4 * H || worst > Math.max(2, 0.14 * P)) return fail('pitch');
+    const f = fitPitch(glyphs);
+    res.pitch = f.P / H;
+    if (!f.ok) return fail('pitch');
+  }
+
+  // Digits with a left-hand stroke (0 2 4 5 6 8 9) fill their cell, so they all have
+  // the same width; 3 and 7 are a little narrower, 1 much narrower. A digit clearly
+  // wider than a full cell is two digits glued together by glow - typically a "1"
+  // stuck to its neighbour, which would turn 16500 into 6500. Widths are measured
+  // between vertical strokes (columns lit over a fifth of the height), so a small
+  // reflection touching a digit does not count, but a glued "1" does.
+  const strokeW = (g) => {
+    const thr = (0.2 * H) / stride;
+    let a = g.c0, b = g.c1;
+    while (a < b && colHist[a] < thr) a++;
+    while (b > a && colHist[b] < thr) b--;
+    return b - a + 1;
+  };
+  const full = glyphs.filter((g) => !g.narrow);
+  const cells = full.filter((g) => '0245689'.includes(g.ch));
+  for (const g of full) {
+    const ref = cells.filter((x) => x !== g).map(strokeW);
+    if (ref.length && strokeW(g) > o.maxWidthRatio * median(ref)) return fail('wide-glyph');
+  }
+
+  // Nothing left out of the number may sit where a digit of it would be. A "1" (or
+  // what is visible of a digit) in the cell next to the first digit, right-aligned on
+  // the pitch, would otherwise be dropped silently - 13050 read as 3050. Indicator
+  // LEDs sit further out and the decimal point is only half a pitch right of the last
+  // digit, low down.
+  {
+    const n = glyphs.length;
+    const P = n >= 3 ? res.pitch * H : n === 2 ? glyphs[1].umax - glyphs[0].umax : 1.4 * Wt;
+    const R0 = glyphs[0].umax, Rn = glyphs[n - 1].umax;
+    // (only a reading shorter than the range allows can be missing a digit)
+    for (const e of !o.maxDigits || n < o.maxDigits ? res.extras : []) {
+      if (e.mass < DOT) continue;
+      const kL = (R0 - e.u1) / P, kR = (e.u1 - Rn) / P;
+      if (kL > 0.3 && kL < 1.45) return fail('stray-digit');
+      if (kR > 0.75 && kR < 1.45 && e.v1 - e.v0 + 1 >= 0.5 * H && e.cu >= 0.3) return fail('stray-digit');
+    }
+    // A shorter reading than the range allows (3050 where 13050 is possible) needs
+    // the cell where the missing leading digit would be to be truly empty - not even
+    // a fragment of a faint "1" - and nothing digit-like right of the last digit
+    // (numbers are right-aligned: only the decimal point, low down, may be there).
+    if (o.maxDigits && n < o.maxDigits) {
+      const Wd = cells.length ? median(cells.map((g) => g.w)) : full.length ? median(full.map((g) => g.w)) : Wt;
+      const uL = R0 - P - Wd - 0.1 * P, uRR = Rn + P + 0.1 * P;
+      const xs = [toOrig(uL, top)[0], toOrig(uL, bottom)[0], toOrig(uRR, top)[0], toOrig(uRR, bottom)[0]];
+      if (Math.min(...xs) < 1 || Math.max(...xs) > w - 2) return fail('edge');
+      const uR = Math.min(glyphs[0].umin, R0 - Wd) - 0.1 * P;
+      const a = Math.max(0, Math.floor(uL - umin)), b = Math.min(usize - 1, Math.ceil(uR - umin));
+      let lit = 0;
+      for (let col = a; col <= b; col++) lit += colHist[col];
+      if (lit * stride > 0.006 * H * H) return fail('stray-digit');
+      // Nothing faint there either: glare can wash a digit out below the threshold.
+      // An over-exposed digit that hot mode missed (its core not enclosed by glow)
+      // still glows red, so hot mode checks the redness.
+      let chk = sm, chkT = th.p50 + 0.2 * th.contrast;
+      if (o.colorMode === 'hot') {
+        chk = blur3(scoreImage(rgba, n, 'red', 1), w, h);
+        const t2 = adaptiveThreshold(chk, n, o);
+        chkT = t2.p50 + 0.3 * t2.contrast;
+      }
+      const faint = (u0, u1, v0, v1) => {
+        let c = 0;
+        for (let vv = v0; vv <= v1; vv++) {
+          for (let uu = u0; uu <= u1; uu++) {
+            const [x, y] = toOrig(uu, vv);
+            const xi = Math.round(x), yi = Math.round(y);
+            if (xi >= 0 && yi >= 0 && xi < w && yi < h && chk[yi * w + xi] > chkT) c++;
+          }
+        }
+        return c;
+      };
+      if (faint(uL, uR, top, bottom) > 0.02 * H * H) return fail('stray-digit');
+      // every digit lights the upper part of the right of its cell (b, or the a bar)
+      if (faint(Rn + P - 0.6 * Wd, uRR, top, top + 0.5 * H) > 0.01 * H * H) return fail('stray-digit');
+    }
+  }
+
+  // Over-exposed digits (white-hot cores in a red glow) are left to hot mode: in red
+  // terms it is the glow that is lit, and around a "3" it can fill in an "8".
+  if (o.colorMode === 'red') {
+    const hs = hotScore(rgba, w, h);
+    let hot = 0, area = 0;
+    for (const g of glyphs) {
+      for (let y = Math.max(0, Math.floor(g.ymin)); y <= Math.min(h - 1, Math.ceil(g.ymax)); y++) {
+        for (let x = Math.max(0, Math.floor(g.xmin)); x <= Math.min(w - 1, Math.ceil(g.xmax)); x++, area++) if (hs[y * w + x]) hot++;
+      }
+    }
+    res.hotFrac = hot / Math.max(1, area);
+    if (res.hotFrac > o.maxHotFrac) return fail('over-exposed');
   }
 
   // The segmentation is sound. Report every glyph, plus the cost of reading it as
@@ -630,7 +844,8 @@ export function locateDisplay(rgba, w, h, opts = {}) {
   const n = w * h;
   const out = { candidates: [], threshold: 0, contrast: 0 };
   if (w < 8 || h < 8) return out;
-  const sm = blur3(scoreImage(rgba, n, o.colorMode, o.strictness), w, h);
+  // an over-exposed ("hot") display is found by its red glow
+  const sm = blur3(scoreImage(rgba, n, o.colorMode === 'hot' ? 'red' : o.colorMode, o.strictness), w, h);
   const th = adaptiveThreshold(sm, n, o);
   out.threshold = th.T; out.contrast = th.contrast;
   if (th.contrast < o.minContrast) return out;
@@ -758,6 +973,45 @@ export function locateDisplay(rgba, w, h, opts = {}) {
 export function expectedDigits(minKg, maxKg, multiplier = 1) {
   const a = String(Math.round(minKg / multiplier)).length, b = String(Math.round(maxKg / multiplier)).length;
   return a === b ? a : 0;
+}
+
+/**
+ * Most likely *valid* value given the per-digit costs: the display can only show
+ * multiples of the step within the plausible range, so e.g. the tens digit of a
+ * 50 kg display must be 0 or 5. Returns {value, cost, excess, margin, maxDigitCost,
+ * maxDigitExcess} where margin is how much better it fits than the next valid value
+ * and maxDigitExcess is how much worse its worst digit fits than the best-fitting
+ * digit in that place (large = the constraint overrules what the camera clearly saw).
+ */
+export function decodeLattice(lattice, cfg) {
+  if (!lattice) return null;
+  const { costs, n } = lattice;
+  const mult = cfg.multiplier || 1, step = cfg.stepKg > 0 ? cfg.stepKg : mult;
+  const lo = Math.max(cfg.minKg, 10 ** (n - 1) * mult), hi = Math.min(cfg.maxKg, (10 ** n - 1) * mult);
+  if (!(hi >= lo) || (hi - lo) / step > 50000) return null;
+  let unconstrained = 0;
+  for (const c of costs) unconstrained += Math.min(...c);
+  let best = null, second = null;
+  for (let v = Math.ceil(lo / step) * step; v <= hi; v += step) {
+    const disp = v / mult;
+    if (!Number.isInteger(disp)) continue;
+    const ds = String(disp);
+    if (ds.length !== n) continue;
+    let cost = 0, mx = 0;
+    for (let i = 0; i < n; i++) {
+      const ci = costs[i][ds.charCodeAt(i) - 48];
+      cost += ci;
+      if (ci > mx) mx = ci;
+    }
+    if (!best || cost < best.cost) { second = best; best = { value: v, cost, maxDigitCost: mx }; }
+    else if (!second || cost < second.cost) second = { value: v, cost, maxDigitCost: mx };
+  }
+  if (!best) return null;
+  best.excess = best.cost - unconstrained;
+  const ds = String(best.value / mult);
+  best.maxDigitExcess = Math.max(...costs.map((c, i) => c[ds.charCodeAt(i) - 48] - Math.min(...c)));
+  best.margin = second ? second.cost - best.cost : Infinity;
+  return best;
 }
 
 /** Plausibility checks on a decoded digit string. */

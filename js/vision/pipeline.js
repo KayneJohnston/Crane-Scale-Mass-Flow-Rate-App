@@ -6,19 +6,22 @@
 // returning RGBA pixels of the source rectangle scaled to dw x dh. In the
 // browser this is canvas.drawImage(); in Node it is sampler.js.
 
-import { locateDisplay, readDigits, validateReading, expectedDigits } from './sevenseg.js';
+import { locateDisplay, readDigits, validateReading, expectedDigits, decodeLattice } from './sevenseg.js';
 import { DisplayTracker, TRACK_DEFAULTS, bestInBand } from './tracker.js';
 
 export const PIPE_DEFAULTS = {
   searchW: 400,        // width of the downscaled search image
   digitTargetH: 48,    // digit height (px) the read crop is rescaled to
   maxReadW: 1000,
-  colorMode: 'auto',   // 'auto' | 'red' | 'bright'
+  colorMode: 'auto',   // 'auto' | 'red' | 'hot' (over-exposed) | 'bright'
   strictness: 1,
-  minKg: 10000, maxKg: 30000, stepKg: 50, multiplier: 1, expectDigits: undefined,
+  minKg: 1000, maxKg: 40000, stepKg: 50, multiplier: 1, expectDigits: undefined,
   minConf: 0.15,
   maxCandidates: 2,
   temporal: true,      // use the recent readings as a prior (needs the frame time t)
+  decodeMinMargin: 0.8,    // constrained decoding: the best valid value must beat the next by this,
+  decodeMaxDigitExcess: 0.5, // ... only settle digits that were ambiguous (never overrule a clear one)
+  decodeMaxDigitCost: 2.2, // ... and no digit may fit worse than this
   keepDebug: false,
 };
 
@@ -34,9 +37,19 @@ const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
  */
 export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = null) {
   const c = { ...TRACK_DEFAULTS, ...PIPE_DEFAULTS, ...cfg };
-  const modes = c.colorMode === 'auto' ? ['red', 'bright'] : [c.colorMode];
+  // auto: red digits, then over-exposed ("hot": white cores in red glow), then any
+  // bright digits - starting with whichever mode worked last
+  let modes = c.colorMode === 'auto' ? ['red', 'hot', 'bright'] : [c.colorMode];
+  if (track.lastMode && modes.includes(track.lastMode)) modes = [track.lastMode, ...modes.filter((m) => m !== track.lastMode)];
   const tracker = c.temporal && t != null ? (track.tracker ||= new DisplayTracker()) : null;
   const pred = tracker ? tracker.predict(t, c) : null;
+  // the digit count the display should show, from the recent readings
+  if (pred && c.expectDigits == null) {
+    const m = c.multiplier || 1;
+    const a = String(Math.round(Math.max(c.minKg, pred.value - pred.band) / m)).length;
+    const b = String(Math.round(Math.min(c.maxKg, pred.value + pred.band) / m)).length;
+    if (a === b) c.expectDigits = a;
+  }
   const attempts = [];
   for (const mode of modes) {
     const r = attempt(sample, srcW, srcH, view, c, track, mode);
@@ -63,6 +76,7 @@ export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = nu
       track.misses = 0;
     }
   } else if (base.ok) res.how = 'ok';
+  if (res.ok && res.mode) track.lastMode = res.mode;
   if (!base.located) track.misses = (track.misses || 0) + 1;
   if (track.misses > 15) track.prev = null; // forget the old position after a while
   return res;
@@ -80,12 +94,16 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
   if (c.keepDebug) out.debug = { search: { img, w: sw, h: sh } };
   for (const cand of loc.candidates) {
     const bx = view.x + cand.x / fx, by = view.y + cand.y / fy, bw = cand.w / fx, bh = cand.h / fy;
-    const mx = 0.45 * bh + 2 / fx, my = 0.35 * bh + 2 / fy;
+    // a digit-cell of margin on both sides: a shorter reading than the range allows is
+    // only trusted if the cell where its missing leading digit would be is visibly empty
+    const mx = 1.0 * bh + 2 / fx, my = 0.35 * bh + 2 / fy;
     const x0 = Math.max(0, bx - mx), y0 = Math.max(0, by - my);
     const x1 = Math.min(srcW, bx + bw + mx), y1 = Math.min(srcH, by + bh + my);
     const cw = x1 - x0, ch = y1 - y0;
     if (cw < 4 || ch < 4) continue;
-    let rs = clamp(c.digitTargetH / Math.max(1, bh), 0.2, 4);
+    // over-exposed digits are thin cores: read them at a higher resolution
+    const target = mode === 'hot' ? c.digitTargetH * 1.6 : c.digitTargetH;
+    let rs = clamp(target / Math.max(1, bh), 0.2, 4);
     if (cw * rs > c.maxReadW) rs = c.maxReadW / cw;
     const rw = Math.max(8, Math.round(cw * rs)), rh = Math.max(8, Math.round(ch * rs));
     const img2 = sample(x0, y0, cw, ch, rw, rh);
@@ -93,6 +111,7 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
     // "bright" mode also sees glare and unlit segments, so demand clearer digits there
     const r = readDigits(img2, rw, rh, {
       colorMode: mode, strictness: c.strictness, keepMask: c.keepDebug, expectDigits: expect,
+      maxDigits: String(Math.round(c.maxKg / (c.multiplier || 1))).length,
       ...(mode === 'bright' ? { minMargin: 0.8, maxCost: 1.3 } : {}),
     });
     const sx = cw / rw, sy = ch / rh;
@@ -111,16 +130,29 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
       out.latLocated = located;
       out.latQuads = r.digits.map((d) => map(d.quad));
     }
-    if (!r.ok) continue;
-    const val = validateReading(r.text, r.conf, c);
+    let val = r.ok ? validateReading(r.text, r.conf, c) : { ok: false, why: r.reason };
+    if (!val.ok && r.lattice && mode !== 'bright') {
+      // some digit was ambiguous on its own: take the most likely valid value if it
+      // clearly beats every other valid value. A digit that clearly shows something
+      // impossible (a last digit that looks like an 8 on a 50 kg display) means the
+      // picture cannot be trusted, so that is never "corrected"
+      const dec = decodeLattice(r.lattice, c);
+      if (dec && dec.margin >= c.decodeMinMargin && dec.maxDigitExcess <= c.decodeMaxDigitExcess && dec.maxDigitCost <= c.decodeMaxDigitCost) {
+        val = { ok: true, value: dec.value, decoded: true };
+        r.text = String(Math.round(dec.value / (c.multiplier || 1)));
+        r.conf = Math.min(1, dec.margin / 3);
+      }
+    }
     if (!val.ok) {
-      if (out.located === located) { out.reason = 'invalid-' + val.why; out.text = r.text; }
+      if (out.located === located) {
+        if (r.ok) { out.reason = 'invalid-' + val.why; out.text = r.text; }
+      }
       continue;
     }
     track.prev = { cx: bx + bw / 2, cy: by + bh / 2, h: bh };
     track.misses = 0;
     const res = {
-      ok: true, value: val.value, text: r.text, conf: r.conf, mode, located,
+      ok: true, value: val.value, text: r.text, conf: r.conf, mode, located, decoded: !!val.decoded,
       quads: r.digits.map((d) => map(d.quad)), bandQuad: map(r.bandQuad), digitHpx: r.digitH * sy,
       rotDeg: r.rotDeg, shear: r.shear, reason: '',
       lattice: mode !== 'bright' ? r.lattice : null, latLocated: located, latQuads: r.digits.map((d) => map(d.quad)),

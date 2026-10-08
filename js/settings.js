@@ -7,8 +7,8 @@ export const DEFAULTS = {
   tolPct: 10,
   windows: '20,40,60,120',
   // scale display
-  minKg: 10000,
-  maxKg: 30000,
+  minKg: 1000,
+  maxKg: 40000,
   stepKg: 50,
   multiplier: 1,
   // camera & vision
@@ -68,7 +68,7 @@ export const SCHEMA = [
     items: [
       { key: 'resolution', label: 'Camera resolution', type: 'select', options: [['4k', '4K (best at distance)'], ['1080p', '1080p'], ['720p', '720p (battery saver)']] },
       { key: 'hwZoom', label: 'Use the camera’s own zoom when available', type: 'checkbox' },
-      { key: 'colorMode', label: 'Digit colour', type: 'select', options: [['auto', 'Auto (red, then any bright)'], ['red', 'Red only'], ['bright', 'Any bright digits']] },
+      { key: 'colorMode', label: 'Digit colour', type: 'select', options: [['auto', 'Auto (recommended)'], ['red', 'Red digits'], ['hot', 'Over-exposed (white digits in red glow)'], ['bright', 'Any bright digits']] },
       { key: 'strictness', label: 'Red strictness', type: 'number', min: 0.3, max: 1.5, step: 0.05, help: 'Lower it if bright digits look white/pink on screen (over-exposed).' },
       { key: 'procFps', label: 'Frames analysed per second', type: 'number', min: 2, max: 20, step: 1 },
       { key: 'videoFps', label: 'Video analysis frames per second', type: 'number', min: 2, max: 30, step: 1 },
@@ -106,6 +106,10 @@ export const SCHEMA = [
 export function loadSettings() {
   let s = {};
   try { s = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch { s = {}; }
+  // v0.2 saved its default range (10,000-30,000 kg), which refuses e.g. an empty
+  // crucible at 3,050 kg: move it to the new default unless the user changed it
+  if (!s.settingsRev && +s.minKg === 10000 && +s.maxKg === 30000) { delete s.minKg; delete s.maxKg; }
+  s.settingsRev = 2;
   return { ...DEFAULTS, ...s, lastMeta: { ...DEFAULTS.lastMeta, ...(s.lastMeta || {}) } };
 }
 
