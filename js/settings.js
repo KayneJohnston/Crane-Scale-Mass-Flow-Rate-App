@@ -12,6 +12,7 @@ export const DEFAULTS = {
   stepKg: 50,
   multiplier: 1,
   // camera & vision
+  lowPower: false,
   resolution: '4k',
   hwZoom: true,
   colorMode: 'auto',
@@ -62,6 +63,15 @@ export const SCHEMA = [
       },
     ],
     help: 'Readings outside the plausible range, or not a multiple of the step, are treated as misreads.',
+  },
+  {
+    group: 'Battery',
+    items: [
+      {
+        key: 'lowPower', label: 'Low power mode', type: 'checkbox',
+        help: 'Camera at 1080p and 15 frames/s instead of 4K at 30, 3 readings a second instead of 10 (just as accurate for the tap rate in tests), and the camera picture dims while the display is being read (tap it to see it again). Also the 🔋 button on the live screen.',
+      },
+    ],
   },
   {
     group: 'Camera & vision',
@@ -126,6 +136,29 @@ export function parseWindows(text) {
   const w = String(text).split(/[,\s]+/).map(Number).filter((x) => x >= 5 && x <= 1800);
   const uniq = [...new Set(w)].sort((a, b) => a - b).slice(0, 4);
   return uniq.length ? uniq : [20, 40, 60, 120];
+}
+
+// What the app spends on each part of its work, normally and in low power mode. The
+// camera stream is the biggest cost after the screen: 1080p at 15 frames/s is an
+// eighth of the pixels a second of 4K at 30 (with the camera's own zoom the digits
+// keep their pixels). Three readings a second are as accurate for the tap rate as
+// ten in simulated taps, even with a third of the frames unreadable; below two
+// the start of a tap is missed.
+export function powerProfile(s) {
+  const low = !!s.lowPower;
+  const procFps = Math.min(30, Math.max(1, +s.procFps || 10));
+  const videoFps = Math.min(30, Math.max(1, +s.videoFps || 8));
+  return {
+    low,
+    resolution: low && s.resolution === '4k' ? '1080p' : s.resolution,
+    camFps: low ? 15 : 30,
+    procFps: low ? Math.min(3, procFps) : procFps,
+    searchFps: low ? 1 : procFps,  // while the display is out of view
+    videoFps: low ? Math.min(3, videoFps) : videoFps,
+    uiMs: low ? 1000 : 200,        // numbers and alarms
+    chartMs: low ? 3000 : 500,
+    saveMs: low ? 30000 : 10000,   // saving the tap in progress
+  };
 }
 
 export function engineConfig(s) {

@@ -67,6 +67,12 @@ main { flex: 1; min-height: 0; overflow: hidden; position: relative; }
   position: absolute; left: 0; top: 0; transform-origin: 0 0; max-width: none; display: block; will-change: transform;
 }
 .cam-box #overlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* low power mode: the picture is dimmed while the display is being read (dark pixels
+   draw almost no power on an OLED screen); the green box and the reading stay on top */
+.cam-dim { position: absolute; inset: 0; background: rgba(0, 0, 0, 0.82); opacity: 0; pointer-events: none; transition: opacity 0.6s; }
+.cam-dim span { position: absolute; left: 10px; bottom: 12px; font-size: 12px; color: var(--muted); }
+.cam-box.dim .cam-dim { opacity: 1; }
+body.low-power .status-pill[data-kind="tapping"]::before { animation: none; }
 .reading-badge {
   position: absolute; left: 8px; top: 8px; padding: 3px 8px; border-radius: 8px;
   background: rgba(0, 0, 0, 0.65); font: 600 15px/1.2 ui-monospace, "SF Mono", Menlo, monospace;

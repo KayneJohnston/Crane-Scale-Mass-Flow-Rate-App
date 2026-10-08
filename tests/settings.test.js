@@ -24,3 +24,16 @@ test('the old default range is upgraded, a range the user chose is kept', () => 
   store[KEY] = JSON.stringify({ ...a, minKg: 10000, maxKg: 30000 });
   assert.equal(loadSettings().minKg, 10000);
 });
+
+test('low power mode: a lighter camera stream, fewer readings, slower screen updates', async () => {
+  const { powerProfile } = await import('../js/settings.js');
+  const normal = powerProfile(DEFAULTS);
+  assert.deepEqual([normal.resolution, normal.camFps, normal.procFps, normal.searchFps], ['4k', 30, 10, 10]);
+  const low = powerProfile({ ...DEFAULTS, lowPower: true });
+  assert.equal(low.low, true);
+  assert.deepEqual([low.resolution, low.camFps, low.procFps, low.searchFps, low.videoFps], ['1080p', 15, 3, 1, 3]);
+  assert.ok(low.uiMs > normal.uiMs && low.chartMs > normal.chartMs && low.saveMs > normal.saveMs);
+  // never more than the user asked for
+  const modest = powerProfile({ ...DEFAULTS, lowPower: true, resolution: '720p', procFps: 2, videoFps: 2 });
+  assert.deepEqual([modest.resolution, modest.procFps, modest.videoFps], ['720p', 2, 2]);
+});

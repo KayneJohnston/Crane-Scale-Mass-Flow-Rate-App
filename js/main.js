@@ -1,6 +1,6 @@
 // Tap Rate — app controller (camera / video / demo -> reader -> engine -> UI).
 
-import { loadSettings, saveSettings, resetSettings, SCHEMA, engineConfig, readerConfig, parseWindows } from './settings.js';
+import { loadSettings, saveSettings, resetSettings, SCHEMA, engineConfig, readerConfig, parseWindows, powerProfile } from './settings.js';
 import { TapEngine } from './analysis/engine.js';
 import { analyseSession } from './analysis/offline.js';
 import { TapSimulator } from './analysis/sim.js';
@@ -12,7 +12,7 @@ import { Beeper } from './audio.js';
 import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js';
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
 
-export const VERSION = '0.3.2';
+export const VERSION = '0.3.3';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -38,6 +38,8 @@ const app = {
   demo: null,
   vid: null,
   lastProc: 0, lastUi: 0, lastChart: 0, lastSave: 0,
+  foundAt: 0,                 // when the display was last located
+  okSince: null, failSince: null, undimUntil: 0, // low power mode: dimming the camera picture
   frames: 0, fpsT: 0, fps: 0,
   alarm: { state: null, since: 0, lastBeep: 0 },
   lastSnap: null,
@@ -151,6 +153,8 @@ function setupGestures() {
   let pinch = null, pan = null, lastTap = 0;
   const dist = () => { const [a, b] = [...pts.values()]; return Math.hypot(a.x - b.x, a.y - b.y); };
   camBox.addEventListener('pointerdown', (e) => {
+    app.undimUntil = performance.now() + 15000;
+    camBox.classList.remove('dim');
     if (e.target.closest('.cam-zoom, .cam-start')) return;
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     camBox.setPointerCapture?.(e.pointerId);
@@ -192,8 +196,10 @@ async function startCamera() {
   await stopSources();
   setPill('Starting camera…', 'busy');
   try {
-    const info = await camera.start({ deviceId: settings.deviceId, resolution: settings.resolution });
+    const P = powerProfile(settings);
+    const info = await camera.start({ deviceId: settings.deviceId, resolution: P.resolution, fps: P.camFps });
     app.source = 'camera';
+    app.foundAt = performance.now();
     useElement(video);
     app.engine = makeEngine();
     reader.resetTracking();
@@ -212,6 +218,31 @@ async function startCamera() {
   }
 }
 
+// A new camera stream with the current lens, resolution and power settings, keeping
+// the tap being recorded and what the reader knows about the display. One at a time:
+// overlapping restarts would leave an orphaned stream running.
+let camRestart = Promise.resolve();
+function restartCamera() {
+  camRestart = camRestart.then(restartCameraNow);
+  return camRestart;
+}
+
+async function restartCameraNow() {
+  if (app.source !== 'camera') return;
+  const P = powerProfile(settings);
+  try {
+    await camera.start({ deviceId: settings.deviceId, resolution: P.resolution, fps: P.camFps });
+    app.hwZoom = 1;
+    $('zoom').max = String(maxZoom());
+    setZoom(app.zoomTotal, { persist: false });
+    populateCameras();
+  } catch (e) {
+    console.error(e);
+    toast(`Camera error: ${e.message || e.name}`, 6000);
+    stopSources();
+  }
+}
+
 function useElement(el) {
   app.el = el;
   video.hidden = el !== video;
@@ -225,6 +256,8 @@ async function stopSources({ keepUi = false } = {}) {
   camera.stop();
   if (video.src) { URL.revokeObjectURL(video.src); video.removeAttribute('src'); video.load(); }
   app.demo = null; app.vid = null; app.source = null; app.engine = null; app.lastRes = null;
+  app.okSince = app.failSince = null;
+  camBox.classList.remove('dim');
   wake.release();
   if (!keepUi) {
     $('camStart').hidden = false;
@@ -291,7 +324,7 @@ async function runVideo() {
   reader.resetTracking();
   updateControls();
   const dur = video.duration;
-  const fps = clamp(+settings.videoFps || 8, 1, 30);
+  const fps = powerProfile(settings).videoFps;
   const wall0 = (v.file.lastModified || Date.now()) - dur * 1000;
   $('camProgress').hidden = false;
   let i = 0, lastT = -Infinity;
@@ -417,17 +450,38 @@ function processFrame(el, w, h, T, wall) {
   const view = viewRect();
   const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug }, T);
   app.lastRes = res;
+  if (res.located) app.foundAt = performance.now();
   app.engine.pushFrame(T, wall, res.ok ? res.value : null, res.conf, res.how);
   app.frames++;
   drawOverlay(res, view);
+  updateDim(res);
   if (settings.debug) drawDebug(res);
 }
 
+// readings per second from the camera: fewer while the display is out of view
+function camFps(P, now) {
+  return now - app.foundAt > 5000 ? P.searchFps : P.procFps;
+}
+
 function loop() {
-  requestAnimationFrame(loop);
+  const P = powerProfile(settings);
+  try { tick(P); } finally { scheduleLoop(P); }
+}
+
+// Normally the loop runs with the screen's refresh. With nothing to show it idles, and
+// in low power mode it wakes only when a reading or a screen update is due.
+function scheduleLoop(P) {
+  if (app.source === 'demo' || (app.source && !P.low)) { requestAnimationFrame(loop); return; }
+  const now = performance.now();
+  let due = app.lastUi + (app.source ? P.uiMs : 500);
+  if (app.source === 'camera') due = Math.min(due, app.lastProc + 1000 / camFps(P, now));
+  setTimeout(loop, clamp(due - now, 15, 1000));
+}
+
+function tick(P) {
   const now = performance.now();
   if (app.source === 'camera' && camera.active && video.videoWidth) {
-    if (now - app.lastProc >= 1000 / clamp(+settings.procFps || 10, 1, 30)) {
+    if (now - app.lastProc >= 1000 / camFps(P, now) - 2) {
       app.lastProc = now;
       processFrame(video, video.videoWidth, video.videoHeight, now / 1000, Date.now());
     }
@@ -435,8 +489,27 @@ function loop() {
   } else if (app.source === 'demo' && app.demo) stepDemo(now);
   if (now - app.fpsT >= 1000) { app.fps = app.frames * 1000 / (now - app.fpsT); app.frames = 0; app.fpsT = now; }
   if (app.vid?.running) return; // video loop renders itself
-  if (now - app.lastUi >= 200) { app.lastUi = now; renderLive(now - app.lastChart >= 500); }
-  if (app.engine?.sess && app.source !== 'video' && now - app.lastSave > 10000) { app.lastSave = now; saveActive(); }
+  if (now - app.lastUi >= P.uiMs - 2) { app.lastUi = now; renderLive(now - app.lastChart >= P.chartMs - 2); }
+  if (app.engine?.sess && app.source !== 'video' && now - app.lastSave > P.saveMs) { app.lastSave = now; saveActive(); }
+}
+
+// Low power mode dims the camera picture once the display has been read for a few
+// seconds (the green box and reading stay visible): on an OLED screen dark pixels draw
+// almost no power. It comes back while the display can't be read, and for 15 s after
+// the picture is touched.
+function updateDim(res) {
+  const now = performance.now();
+  if (res.ok) { app.okSince ??= now; app.failSince = null; }
+  else { app.failSince ??= now; if (now - app.failSince > 2000) app.okSince = null; }
+  const dim = !!settings.lowPower && app.source === 'camera' && app.okSince != null && now - app.okSince > 3000 && now > app.undimUntil;
+  camBox.classList.toggle('dim', dim);
+}
+
+function syncPower() {
+  const low = !!settings.lowPower;
+  $('btnLowPower').classList.toggle('on', low);
+  document.body.classList.toggle('low-power', low);
+  if (!low) camBox.classList.remove('dim');
 }
 
 // ------------------------------------------------------------ overlay --
@@ -1005,7 +1078,8 @@ function renderSettings() {
 function applySettings(key) {
   if (app.engine) app.engine.setConfig(engineConfig(settings));
   if (key === 'windows' || key === 'targetKgMin' || key === 'tolPct') buildTiles();
-  if (key === 'resolution' && app.source === 'camera') startCamera();
+  if ((key === 'resolution' || key === 'lowPower') && app.source === 'camera') restartCamera();
+  if (key === 'lowPower' || key === 'all') syncPower();
   if (key === 'hwZoom') setZoom(app.zoomTotal);
   if (key === 'debug') $('debugPanel').hidden = !settings.debug;
   renderLive(true);
@@ -1087,6 +1161,12 @@ function wire() {
   const syncMute = () => { mute.textContent = settings.beep ? '🔔' : '🔕'; mute.classList.toggle('off', !settings.beep); };
   mute.addEventListener('click', () => { settings.beep = !settings.beep; saveSettings(settings); syncMute(); beeper.unlock(); renderSettings(); toast(settings.beep ? 'Alerts on' : 'Alerts muted'); });
   syncMute();
+  $('btnLowPower').addEventListener('click', () => {
+    settings.lowPower = !settings.lowPower;
+    saveSettings(settings); renderSettings(); applySettings('lowPower');
+    toast(settings.lowPower ? 'Low power mode: camera 1080p at 15 frames/s, 3 readings a second, picture dimmed while reading' : 'Low power mode off');
+  });
+  syncPower();
   const dbg = $('btnDebug');
   dbg.classList.toggle('on', !!settings.debug);
   $('debugPanel').hidden = !settings.debug;
@@ -1133,7 +1213,7 @@ function wire() {
     } catch (err) { toast(`Import failed: ${err.message}`); }
   });
   // settings tools
-  $('selCamera').addEventListener('change', (e) => { settings.deviceId = e.target.value; saveSettings(settings); if (app.source === 'camera') startCamera(); });
+  $('selCamera').addEventListener('change', (e) => { settings.deviceId = e.target.value; saveSettings(settings); restartCamera(); });
   $('fileVideo').addEventListener('change', (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) loadVideo(f); });
   $('btnDemo').addEventListener('click', () => startDemo(+$('selDemoSpeed').value || 5));
   $('btnResetSettings').addEventListener('click', () => {
@@ -1152,7 +1232,8 @@ function wire() {
     if (document.visibilityState !== 'visible') { saveActive(); return; }
     wake.refresh();
     if (app.source === 'camera' && !camera.active) {
-      try { await camera.start({ deviceId: settings.deviceId, resolution: settings.resolution }); setZoom(app.zoomTotal); } catch { toast('Tap “Start camera” to resume'); }
+      const P = powerProfile(settings);
+      try { await camera.start({ deviceId: settings.deviceId, resolution: P.resolution, fps: P.camFps }); app.hwZoom = 1; setZoom(app.zoomTotal); } catch { toast('Tap “Start camera” to resume'); }
     }
   });
   window.addEventListener('pagehide', () => saveActive());

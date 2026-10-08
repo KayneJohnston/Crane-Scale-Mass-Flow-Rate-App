@@ -2,7 +2,7 @@
 // getUserMedia is replaced by a canvas stream showing a simulated crane-scale
 // display (rendered in real time), so the whole chain runs:
 //   <video> -> drawImage sampling -> seven-segment reader -> engine -> session -> History.
-//   node tests/e2e/camera.mjs [outDir]
+//   node tests/e2e/camera.mjs [outDir] [--low-power]
 import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
 import { serve } from '../../tools/serve.mjs';
@@ -11,7 +11,8 @@ const require = createRequire(import.meta.url);
 let playwright;
 try { playwright = require('playwright'); } catch { playwright = require('/opt/node-tools/node_modules/playwright'); }
 
-const out = process.argv[2] || 'test-output';
+const lowPower = process.argv.includes('--low-power');
+const out = process.argv.slice(2).find((a) => !a.startsWith('--')) || 'test-output';
 mkdirSync(out, { recursive: true });
 const server = await serve(0);
 const base = `http://127.0.0.1:${server.address().port}/`;
@@ -22,9 +23,11 @@ const errors = [];
 page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
 page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
 
+await page.addInitScript(`window.__lowPower = ${lowPower};`);
 await page.addInitScript(() => {
-  localStorage.setItem('tapRate.settings.v1', JSON.stringify({ stallSec: 30, lostSec: 15, zoom: 1.4, resolution: '1080p' }));
-  navigator.mediaDevices.getUserMedia = async () => {
+  localStorage.setItem('tapRate.settings.v1', JSON.stringify({ stallSec: 30, lostSec: 15, zoom: 1.4, resolution: '1080p', lowPower: window.__lowPower }));
+  navigator.mediaDevices.getUserMedia = async (c) => {
+    window.__constraints = c;
     const { renderDisplay } = await import('/js/vision/render7seg.js');
     const { TapSimulator } = await import('/js/analysis/sim.js');
     const W = 960, H = 540;
@@ -53,19 +56,32 @@ const check = (cond, msg) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${msg}`); 
 
 await page.goto(base);
 await page.click('#btnCamera');
-let ok = 0, n = 0, started = false, shot = false;
+let ok = 0, n = 0, started = false, shot = false, dimmed = 0, fpsSum = 0, fpsN = 0;
 for (let i = 0; i < 260; i++) {
   await page.waitForTimeout(500);
   const st = await page.evaluate(() => {
     const a = window.__tapRate.app;
-    return { ok: !!a.lastRes?.ok, src: a.source, sess: !!a.engine?.sess, pill: document.getElementById('statusPill').textContent, state: document.getElementById('mainInd').dataset.state };
+    return { ok: !!a.lastRes?.ok, src: a.source, sess: !!a.engine?.sess, pill: document.getElementById('statusPill').textContent, state: document.getElementById('mainInd').dataset.state, fps: a.fps, dim: document.getElementById('camBox').classList.contains('dim') };
   });
   n++; if (st.ok) ok++;
+  if (st.dim) dimmed++;
+  if (i >= 6) { fpsSum += st.fps; fpsN++; }
   if (st.sess) started = true;
-  if (started && !shot && ['ok', 'fast', 'slow'].includes(st.state)) { await page.screenshot({ path: `${out}/cam-tapping.png` }); shot = true; }
+  if (started && !shot && ['ok', 'fast', 'slow'].includes(st.state)) { await page.screenshot({ path: `${out}/cam-tapping${lowPower ? '-lowpower' : ''}.png` }); shot = true; }
   if (started && !st.sess) break;
 }
 check(ok / n > 0.8, `frames read successfully: ${ok}/${n}`);
+const fps = fpsSum / Math.max(1, fpsN);
+const asked = await page.evaluate(() => window.__constraints?.video);
+if (lowPower) {
+  // (3 a second when the page is idle; the simulated camera keeps this one busy)
+  check(fps > 1.5 && fps < 3.6, `low power: at most 3 readings a second (${fps.toFixed(1)})`);
+  check(asked?.frameRate?.max === 15 && asked?.height?.ideal === 1080, `low power: camera asked for 1080p at 15 frames/s (${JSON.stringify(asked?.frameRate)} ${asked?.height?.ideal})`);
+  check(dimmed / n > 0.5, `low power: picture dimmed while reading (${dimmed}/${n} checks)`);
+} else {
+  check(fps > 5, `up to 10 readings a second (${fps.toFixed(1)})`);
+  check(dimmed === 0, 'picture never dimmed');
+}
 check(started, 'session auto-started from the camera stream');
 await page.waitForTimeout(1500);
 const sessions = await page.evaluate(async () => (await window.__tapRate.store.all()).map((s) => ({ a: s.analysis, raw: s.raw.length, src: s.source })));

@@ -11,13 +11,13 @@ export class Camera {
 
   get active() { return !!(this.track && this.track.readyState === 'live'); }
 
-  async start({ deviceId = '', resolution = '4k' } = {}) {
+  async start({ deviceId = '', resolution = '4k', fps = 30 } = {}) {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('Camera not available. Open the app over https in Safari.');
     }
     this.stop();
     const [w, h] = RES[resolution] || RES['1080p'];
-    const base = { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: 30, max: 30 } };
+    const base = { width: { ideal: w }, height: { ideal: h }, frameRate: { ideal: fps, max: fps } };
     const attempts = [];
     if (deviceId) attempts.push({ ...base, deviceId: { exact: deviceId } });
     attempts.push({ ...base, facingMode: { ideal: 'environment' } });

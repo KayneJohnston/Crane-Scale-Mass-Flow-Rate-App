@@ -20,6 +20,7 @@
     <header class="topbar">
       <div class="status-pill" id="statusPill" data-kind="idle">Camera off</div>
       <div class="top-actions">
+        <button class="icon-btn" id="btnLowPower" aria-label="Low power mode" title="Low power mode">🔋</button>
         <button class="icon-btn" id="btnMute" aria-label="Mute alerts" title="Mute alerts">🔔</button>
         <button class="icon-btn" id="btnDebug" aria-label="Show vision debug" title="Vision debug">👁</button>
         <button class="icon-btn" id="btnPower" aria-label="Stop camera" title="Stop camera">⏻</button>
@@ -32,6 +33,7 @@
         <div class="cam-box" id="camBox">
           <video id="video" playsinline muted autoplay></video>
           <canvas id="simCanvas" width="960" height="540" hidden></canvas>
+          <div class="cam-dim"><span>Dimmed · tap to show</span></div>
           <canvas id="overlay"></canvas>
           <div class="reading-badge" id="readingBadge" hidden></div>
           <div class="cam-zoom">

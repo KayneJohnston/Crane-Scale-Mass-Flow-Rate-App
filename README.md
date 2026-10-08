@@ -62,7 +62,22 @@ No App Store, no account, no server. It's a web page you add to the home screen.
 - Record in 4K if you can (Settings → Camera → Record Video).
 - If the digits look white rather than red on the phone, press and hold on the display until *AE/AF LOCK* appears, then drag the ☀︎ slider down a little until they look red. Less glow means crisper digits.
 
-**Battery / screen:** the app keeps the screen awake while the camera runs. If your iOS version doesn't, set *Settings → Display & Brightness → Auto-Lock* to a longer time.
+**Screen:** the app keeps the screen awake while the camera runs (iOS stops the camera when the screen locks). If your iOS version doesn't, set *Settings → Display & Brightness → Auto-Lock* to a longer time.
+
+**Battery.** The screen and the camera use most of the power, then the app's reading of the digits. **Low power mode** (🔋 on the live screen, or Settings → Battery) trims all three:
+- The camera runs at 1080p and 15 frames a second instead of 4K at 30, an eighth of the pixels per second. With the camera's own zoom the digits keep their pixels; zoom in a little more if they look small.
+- The app reads 3 frames a second instead of 10. At the target rate the display only changes every 5 seconds (50 kg steps at 600 kg/min), and in simulated taps the rate was just as accurate, even with a third of the frames unreadable.
+- The camera picture dims while the display is being read: on the OLED screens of most iPhones, dark pixels use almost no power. The green box and the reading stay visible. Tap the picture to see it again for 15 s; it also comes back by itself whenever the digits can't be read.
+- While the display is out of view, the app looks for it once a second.
+- The numbers update once a second and the chart every 3 s.
+- A recorded video is analysed at 3 frames per second of video, about three times faster.
+
+In a desktop browser test, the app's own processing fell from 43% to 14% of one processor core. The camera and screen savings come on top and can only be measured on the phone. Other ways to make the battery last:
+- Turn the screen brightness down as far as is comfortable; at full brightness the screen is usually the biggest drain.
+- Switch on the iPhone's own Low Power Mode (Control Centre). It doesn't affect the app.
+- Keep the phone out of the sun and away from the heat of the pot. A hot iPhone dims its screen and slows down to protect itself.
+- Tap ⏻ to stop the camera when you're not measuring.
+- For a whole shift, keep a battery pack or charging cable on the phone.
 
 ---
 
@@ -185,6 +200,7 @@ Settings that may matter:
 - **Red strictness:** lower it if the digits look pink on screen in *Red digits* mode.
 - **Plausible range:** 1,000–40,000 kg by default, so lighter loads (like the 3,050 kg in the test photos) read too. If you only ever measure taps, narrowing it to 10,000–30,000 makes the reader expect exactly 5 digits, which is slightly more robust.
 - **Display shows:** choose this if the display shows tonnes with a decimal point.
+- **Low power mode:** lighter camera stream, fewer readings and a dimmed picture; see *Battery* in section 2.
 
 ---
 
