@@ -37,6 +37,8 @@ export const RENDER_DEFAULTS = {
   clutter: [],         // [{x, y, r, color:[r,g,b]}] solid discs elsewhere in the scene
   dp: -1,              // index of the digit followed by a decimal point (-1 = none)
   leds: [],            // [{u, v, r}] lit indicator dots, in digit heights from the top-left of the first cell
+  hlines: [],          // [{v, t}] lit horizontal lines across the digit row (a window lip reflecting
+                       // the glow), top at v and t thick, in digit heights from the top of the digits
   seed: 1,
 };
 
@@ -191,6 +193,10 @@ export function renderDisplay(buf, W, H, opts = {}) {
       pts.push(toImg((d.u + d.r * Math.cos(a)) * Hd, (d.v + d.r * Math.sin(a)) * Hd));
     }
     fillConvex(lit, W, H, pts);
+  }
+  for (const ln of o.hlines) {
+    const u0 = -0.3 * Hd, u1 = (n - 1) * pitch + Wd + 0.3 * Hd, v0 = ln.v * Hd, v1 = (ln.v + ln.t) * Hd;
+    fillConvex(lit, W, H, [[u0, v0], [u1, v0], [u1, v1], [u0, v1]].map(([a, b]) => toImg(a, b)));
   }
   if (o.blur >= 1) { boxBlurFloat(lit, W, H, Math.round(o.blur)); boxBlurFloat(ghost, W, H, Math.round(o.blur)); }
   let glowL = null;

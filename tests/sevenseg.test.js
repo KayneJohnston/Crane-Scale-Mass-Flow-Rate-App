@@ -173,4 +173,26 @@ test('scenes that once misread now read correctly or are refused', () => {
     const r = readScene(sc);
     assert.ok(!r.ok || r.value === sc.value, `seed ${seed}: read ${r.value} for ${sc.value}`);
   }
+  // over-exposed with frame lines: a 7 losing its top bar to a line (24700 -> 24100,
+  // 7600 -> 1600), a 3 losing its bottom bars (3450 -> 7450)
+  for (const seed of [3403, 3434, 3589]) {
+    const sc = hotScene(seed);
+    const r = readScene(sc);
+    assert.ok(!r.ok || r.value === sc.value, `hot seed ${seed}: read ${r.value} for ${sc.value}`);
+  }
+});
+
+test('a bright line along the bottom of the window does not glue the digits together', () => {
+  // the window's lip reflects the glow as a thin line touching every digit
+  let ok = 0, wrong = 0;
+  const N = 16;
+  for (let s = 1; s <= N; s++) {
+    const sc = hotScene(700 + s);
+    sc.opts.hlines = [{ v: 1.0, t: 0.045 }];
+    const r = readScene(sc);
+    if (r.ok && r.value === sc.value) ok++;
+    else if (r.ok) wrong++;
+  }
+  assert.equal(wrong, 0);
+  assert.ok(ok / N >= 0.75, `read rate ${ok}/${N}`);
 });

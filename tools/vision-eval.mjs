@@ -43,6 +43,12 @@ export function hotScene(seed, opts = {}) {
     bg: [Math.round(U(120, 190)), Math.round(U(110, 170)), Math.round(U(50, 100))],
     noise: U(2, 7), blur: rnd() < 0.5 ? 0 : U(1, 1.8), seed: seed * 3 + 1,
     leds,
+    // the window's lip reflecting the glow: a thin bright line touching the bottom of
+    // the digits (and sometimes one clear of their top, like the real display's frame)
+    hlines: [
+      ...(rnd() < 0.5 ? [{ v: U(0.99, 1.05), t: U(0.025, 0.06) }] : []),
+      ...(rnd() < 0.25 ? [{ v: -U(0.15, 0.25), t: U(0.025, 0.05) }] : []),
+    ],
     dp: text.length - 1,
     glare: rnd() < 0.4 ? [{ x: U(0, W), y: U(0, H * 0.3), r: U(40, 160), i: U(80, 200) }] : [],
   };

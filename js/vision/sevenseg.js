@@ -323,79 +323,130 @@ export function readDigits(rgba, w, h, opts = {}) {
   let vmin = Infinity, vmax = -Infinity;
   for (let i = 0; i < k; i++) { if (v[i] < vmin) vmin = v[i]; if (v[i] > vmax) vmax = v[i]; }
   const vsize = Math.ceil(vmax - vmin) + 2;
+  const rowOf = (i) => Math.round(v[i] - vmin);
   const rowHist = new Int32Array(vsize);
-  for (let i = 0; i < k; i++) rowHist[Math.round(v[i] - vmin)]++;
-  let maxRow = 0;
-  for (let r = 0; r < vsize; r++) if (rowHist[r] > maxRow) maxRow = rowHist[r];
-  const rowThr = Math.max(1, 0.06 * maxRow);
-  let runs = [];
-  for (let r = 0, s = -1; r <= vsize; r++) {
-    const on = r < vsize && rowHist[r] >= rowThr;
-    if (on && s < 0) s = r;
-    if (!on && s >= 0) { runs.push([s, r - 1]); s = -1; }
-  }
-  // per-run mass and horizontal extent
-  const runStats = (rs) => {
-    const st = rs.map((r) => ({ r, mass: 0, umin: Infinity, umax: -Infinity }));
+  for (let i = 0; i < k; i++) rowHist[rowOf(i)]++;
+  // The digit row from a row histogram: rows lit above 6% of the busiest row form runs,
+  // vertically adjacent runs of the same text line are merged (e.g. the upper and
+  // lower halves of "17000", which has no middle bars at all; a separate blob above or
+  // below the digits has a much narrower extent and is kept apart), and the digit row
+  // is the run with the most lit pixels spread over the widest extent.
+  const findBand = (hist, skip) => {
+    let maxRow = 0;
+    for (let r = 0; r < vsize; r++) if (hist[r] > maxRow) maxRow = hist[r];
+    const rowThr = Math.max(1, 0.06 * maxRow);
+    const runs = [];
+    for (let r = 0, s0 = -1; r <= vsize; r++) {
+      const on = r < vsize && hist[r] >= rowThr;
+      if (on && s0 < 0) s0 = r;
+      if (!on && s0 >= 0) { runs.push([s0, r - 1]); s0 = -1; }
+    }
+    const rst = runs.map((r) => ({ r, mass: 0, umin: Infinity, umax: -Infinity }));
     const idx = new Int16Array(vsize).fill(-1);
-    rs.forEach((r, j) => { for (let q = r[0]; q <= r[1]; q++) idx[q] = j; });
+    runs.forEach((r, j) => { for (let q = r[0]; q <= r[1]; q++) idx[q] = j; });
     for (let i = 0; i < k; i++) {
-      const j = idx[Math.round(v[i] - vmin)];
-      if (j < 0) continue;
-      const S = st[j];
+      const r = rowOf(i);
+      if (idx[r] < 0 || (skip && skip[r])) continue;
+      const S = rst[idx[r]];
       S.mass++;
       if (u[i] < S.umin) S.umin = u[i]; if (u[i] > S.umax) S.umax = u[i];
     }
-    return st;
-  };
-  // Merge vertically adjacent runs that belong to the same text line, e.g. the
-  // upper and lower halves of "17000" (no middle bars at all). A separate blob
-  // above/below the digits has a much narrower horizontal extent and is kept apart.
-  let rst = runStats(runs);
-  for (let merged = true; merged && rst.length > 1;) {
-    merged = false;
-    for (let j = 0; j < rst.length - 1; j++) {
-      const A = rst[j], B = rst[j + 1];
-      const gap = B.r[0] - A.r[1] - 1;
-      const exA = A.umax - A.umin, exB = B.umax - B.umin;
-      const exRatio = Math.min(exA, exB) / Math.max(1, exA, exB);
-      const massRatio = Math.min(A.mass, B.mass) / Math.max(1, A.mass, B.mass);
-      if (gap <= Math.max(2, 0.3 * (B.r[1] - A.r[0] + 1)) && exRatio >= 0.5 && massRatio >= 0.15) {
-        rst.splice(j, 2, {
-          r: [A.r[0], B.r[1]], mass: A.mass + B.mass,
-          umin: Math.min(A.umin, B.umin), umax: Math.max(A.umax, B.umax),
-        });
-        merged = true; break;
+    for (let merged = true; merged && rst.length > 1;) {
+      merged = false;
+      for (let j = 0; j < rst.length - 1; j++) {
+        const A = rst[j], B = rst[j + 1];
+        const gap = B.r[0] - A.r[1] - 1;
+        const exA = A.umax - A.umin, exB = B.umax - B.umin;
+        const exRatio = Math.min(exA, exB) / Math.max(1, exA, exB);
+        const massRatio = Math.min(A.mass, B.mass) / Math.max(1, A.mass, B.mass);
+        if (gap <= Math.max(2, 0.3 * (B.r[1] - A.r[0] + 1)) && exRatio >= 0.5 && massRatio >= 0.15) {
+          rst.splice(j, 2, {
+            r: [A.r[0], B.r[1]], mass: A.mass + B.mass,
+            umin: Math.min(A.umin, B.umin), umax: Math.max(A.umax, B.umax),
+          });
+          merged = true; break;
+        }
       }
     }
-  }
-  // the digit row: lots of lit pixels spread over a wide horizontal extent
-  let bestRun = null, bestScore = -1;
-  for (const S of rst) {
-    const sc = S.mass * Math.sqrt(Math.max(1, S.umax - S.umin));
-    if (sc > bestScore) { bestScore = sc; bestRun = S.r; }
-  }
+    let bestRun = null, bestScore = -1;
+    for (const S of rst) {
+      const sc = S.mass * Math.sqrt(Math.max(1, S.umax - S.umin));
+      if (sc > bestScore) { bestScore = sc; bestRun = S.r; }
+    }
+    return bestRun;
+  };
+  let bestRun = findBand(rowHist, null);
   if (!bestRun) return fail('no-band');
-  const top = vmin + bestRun[0] - 0.5, bottom = vmin + bestRun[1] + 0.5;
+
+  // A bright line along the bottom or top of the window (the frame lip reflecting the
+  // glow) touches the digits and glues them into one shape; it also outweighs every
+  // digit row, which would split the digits' band. A row holding an unbroken lit run
+  // longer than 1.5 digit heights is such a line: a digit's bar is at most about half a
+  // digit height long, and the gap to the next digit is never lit along the bar. The
+  // line can sit a degree off the digits' tilt and drift across rows, so it is found
+  // with the rows either side - but only rows that themselves hold a run longer than
+  // any bar are taken out, so the bars it touches stay. The band is then found again
+  // without them, and nothing in those rows is treated as part of a digit.
+  const H0 = bestRun[1] - bestRun[0] + 1;
+  const rowU = Array.from({ length: vsize }, () => []);
+  for (let i = 0; i < k; i++) rowU[rowOf(i)].push(u[i]);
+  const longestRun = (r0, r1) => {
+    const us = [];
+    for (let r = Math.max(0, r0); r <= Math.min(vsize - 1, r1); r++) for (const x of rowU[r]) us.push(x);
+    us.sort((a, b) => a - b);
+    let best = 0;
+    for (let j = 1, s0 = us[0]; j < us.length; j++) {
+      if (us[j] - us[j - 1] > 1.5 + stride) s0 = us[j];
+      best = Math.max(best, us[j] - s0);
+    }
+    return best;
+  };
+  // (only at the band's top and bottom edges or beyond: the window's frame never runs
+  // through the middle of the digits)
+  const edge = Math.max(1, Math.round(0.2 * H0));
+  const lineRows = new Uint8Array(vsize);
+  let anyLine = false;
+  for (let r = 0; r < vsize; r++) {
+    if (r >= bestRun[0] + edge && r <= bestRun[1] - edge) continue;
+    if (rowHist[r] > 0.75 * H0 / stride && longestRun(r, r) > 0.75 * H0 && longestRun(r - 1, r + 1) > 1.5 * H0) { lineRows[r] = 1; anyLine = true; }
+  }
+  if (anyLine) {
+    const h2 = Int32Array.from(rowHist);
+    for (let r = 0; r < vsize; r++) if (lineRows[r]) h2[r] = 0;
+    bestRun = findBand(h2, lineRows);
+    if (!bestRun) return fail('no-band');
+  }
+  const [rTop, rBot] = bestRun;
+  // the nearest line above and below the digits
+  let lineTop = null, lineBot = null;
+  for (let r = rTop - 1; r >= 0 && lineTop == null; r--) if (lineRows[r]) lineTop = r;
+  for (let r = rBot + 1; r < vsize && lineBot == null; r++) if (lineRows[r]) lineBot = r;
+  const near = Math.max(2, 0.12 * H0);
+  const lineAbove = lineTop != null && rTop - lineTop <= near, lineBelow = lineBot != null && lineBot - rBot <= near;
+  const top = vmin + rTop - 0.5, bottom = vmin + rBot + 0.5;
   const H = bottom - top;
   res.digitH = H;
   if (H < o.minDigitH) return fail('small');
 
   // ---- glyphs (columns) ----
   const padV = 0.04 * H;
+  // (the usual margin, but never into a frame line: a bar tilted a row higher than the
+  // others keeps its pixels, the line loses its)
+  const padT = lineTop != null ? Math.min(padV, top - (vmin + lineTop + 0.5)) : padV;
+  const padB = lineBot != null ? Math.min(padV, vmin + lineBot - 0.5 - bottom) : padV;
   let umin = Infinity, umax = -Infinity;
   for (let i = 0; i < k; i++) {
-    if (v[i] < top - padV || v[i] > bottom + padV) continue;
+    if (v[i] < top - padT || v[i] > bottom + padB || lineRows[rowOf(i)]) continue;
     if (u[i] < umin) umin = u[i]; if (u[i] > umax) umax = u[i];
   }
   const usize = Math.ceil(umax - umin) + 2;
   const colHist = new Int32Array(usize);
   for (let i = 0; i < k; i++) {
-    if (v[i] < top - padV || v[i] > bottom + padV) continue;
+    if (v[i] < top - padT || v[i] > bottom + padB || lineRows[rowOf(i)]) continue;
     colHist[Math.round(u[i] - umin)]++;
   }
   const colThr = Math.max(1, (0.05 * H) / stride);
-  runs = [];
+  let runs = [];
   for (let col = 0, s = -1; col <= usize; col++) {
     const on = col < usize && colHist[col] >= colThr;
     if (on && s < 0) s = col;
@@ -415,7 +466,7 @@ export function readDigits(rgba, w, h, opts = {}) {
   const fillPos = colStart.slice(0, usize);
   const order = new Int32Array(colStart[usize]);
   for (let i = 0; i < k; i++) {
-    if (v[i] < top - padV || v[i] > bottom + padV) continue;
+    if (v[i] < top - padT || v[i] > bottom + padB || lineRows[rowOf(i)]) continue;
     order[fillPos[Math.round(u[i] - umin)]++] = i;
   }
   res.bandFrac = colStart[usize] / k;
@@ -490,7 +541,9 @@ export function readDigits(rgba, w, h, opts = {}) {
 
   let G = runs.map(([a, b]) => measure(a, b)).filter((g) => g.cnt);
   const ws0 = G.filter((g) => g.isGlyph && g.w >= 0.3 * H && g.w <= 0.9 * H).map((g) => g.w);
-  const Wt = ws0.length ? median(ws0) : 0.58 * H;
+  // (with few free-standing digits - most glued in pairs - one narrow 7 or 3 must not set
+  // the width: a full digit is about 0.58 digit heights wide)
+  const Wt = ws0.length >= 3 ? median(ws0) : Math.max(ws0.length ? median(ws0) : 0, 0.58 * H);
   const limit = Math.max(0.72 * H, 1.3 * Wt);
   // segment-fill references ("fully lit" level) from well-separated digit-sized glyphs
   const fillsH = [], fillsV = [];
@@ -502,6 +555,13 @@ export function readDigits(rgba, w, h, opts = {}) {
   const refH = Math.max(0.15, quantile(fillsH, 0.8) || 0.6);
   const refV = Math.max(0.15, quantile(fillsV, 0.8) || 0.6);
 
+  // A frame line taken out right above or below the digits may have hidden their top
+  // (a) or bottom (d) bars. Taking the line out can hide a bar but never make one, so
+  // a bar that is clearly there counts, while a faint or missing one is left out of the
+  // matching. No two digits differ in that segment alone, so a doubt becomes a refusal,
+  // not a misread (and a "7" that lost its top bar looks like a "1": see the "1" checks).
+  const unknownSeg = [lineAbove, false, false, lineBelow, false, false, false];
+  const unknown = (nv, q) => unknownSeg[q] && nv[q] < 0.5;
   const classify = (g) => {
     g.narrow = g.w < 0.6 * Wt && g.w < 0.36 * H;
     if (g.narrow) {
@@ -531,7 +591,7 @@ export function readDigits(rgba, w, h, opts = {}) {
     const perChar = new Map();
     for (const t of TEMPLATES) {
       let cost = 0;
-      for (let q = 0; q < 7; q++) cost += Math.abs(nv[q] - t.v[q]);
+      for (let q = 0; q < 7; q++) if (!unknown(nv, q)) cost += Math.abs(nv[q] - t.v[q]);
       if (!perChar.has(t.ch) || cost < perChar.get(t.ch)) perChar.set(t.ch, cost);
     }
     let best = Infinity, second = Infinity, bestCh = '?';
@@ -542,7 +602,7 @@ export function readDigits(rgba, w, h, opts = {}) {
     g.conf = Math.max(0, Math.min(1, g.margin / 1.5));
     // segments should be clearly on or off; two or more half-lit ones = ambiguous digit
     let halfLit = 0;
-    for (let q = 0; q < 7; q++) if (nv[q] > 0.35 && nv[q] < 0.65) halfLit++;
+    for (let q = 0; q < 7; q++) if (!unknown(nv, q) && nv[q] > 0.35 && nv[q] < 0.65) halfLit++;
     g.good = best <= o.maxCost && g.margin >= o.minMargin && halfLit < 2 && bestCh !== '1'; // a real "1" is narrow
     // every digit cell on a display has the same width (only "1" is narrow), so a
     // piece much wider/narrower than the typical digit is not one digit
@@ -634,8 +694,18 @@ export function readDigits(rgba, w, h, opts = {}) {
   }
   const baseK = runOpts.reduce((a, op) => a + Math.min(...op.keys()), 0);
   let choice = null;
-  if (o.expectDigits && best.has(o.expectDigits)) choice = best.get(o.expectDigits);
-  else {
+  if (o.expectDigits) {
+    // the expected count - or one or two pieces more when indicator LEDs sit at an end of
+    // the row (left out below if they are off the digit pitch; otherwise the reading
+    // has the wrong number of digits and is refused)
+    let bc = Infinity;
+    for (let n = o.expectDigits; n <= o.expectDigits + 2; n++) {
+      if (!best.has(n)) continue;
+      const c = best.get(n).cost + SPLIT_PENALTY * (n - o.expectDigits);
+      if (c < bc) { bc = c; choice = best.get(n); }
+    }
+  }
+  if (!choice) {
     let bc = Infinity;
     for (const [k, val] of best) {
       const c = val.cost + SPLIT_PENALTY * Math.max(0, k - Math.max(1, baseK)) + (k === 0 ? 100 : 0);
@@ -659,12 +729,12 @@ export function readDigits(rgba, w, h, opts = {}) {
     for (let i = 0; i < n; i++) worst = Math.max(worst, Math.abs(R[i] - (rm + P * (i - im))));
     return { P, worst, ok: P >= 0.55 * H && P <= 1.4 * H && worst <= Math.max(2, 0.14 * P) };
   };
-  // A piece of round blobs at either end of the row that is off that pitch is a pair
-  // of indicator LEDs, not a "1": leave it out of the number.
+  // A piece at either end of the row that is off that pitch is not a digit of the
+  // number - typically indicator LEDs (a stacked pair joined by glow looks like a short
+  // stroke). Leave it out; the checks below refuse the frame if a digit went missing.
   for (let moved = true; moved && glyphs.length >= 4;) {
     moved = false;
     for (const g of [glyphs[0], glyphs[glyphs.length - 1]]) {
-      if (!g.dotsLike) continue;
       const rest = glyphs.filter((x) => x !== g), f = fitPitch(rest);
       if (!f.ok) continue;
       const k = g === glyphs[0] ? (rest[0].umax - g.umax) / f.P : (g.umax - rest[rest.length - 1].umax) / f.P;
@@ -695,6 +765,9 @@ export function readDigits(rgba, w, h, opts = {}) {
   for (const g of glyphs) {
     classify(g);
     if (!g.narrow) continue;
+    // a frame line just above the digits may hide (part of) a "7"'s top bar, and a
+    // "7" without its top bar is exactly a "1"
+    if (lineAbove) return fail('partial-1');
     const cellL = g.umax + 1 - 0.95 * Wt;
     for (const e of res.extras) {
       const uc = (e.u0 + e.u1) / 2, vc = (e.v0 + e.v1) / 2;
@@ -763,9 +836,10 @@ export function readDigits(rgba, w, h, opts = {}) {
       const xs = [toOrig(uL, top)[0], toOrig(uL, bottom)[0], toOrig(uRR, top)[0], toOrig(uRR, bottom)[0]];
       if (Math.min(...xs) < 1 || Math.max(...xs) > w - 2) return fail('edge');
       const uR = Math.min(glyphs[0].umin, R0 - Wd) - 0.1 * P;
-      const a = Math.max(0, Math.floor(uL - umin)), b = Math.min(usize - 1, Math.ceil(uR - umin));
+      // (next to a cut-off frame line, what is left of the line is not a digit)
+      const vA = top + (lineAbove ? 0.12 * H : 0), vB = bottom - (lineBelow ? 0.12 * H : 0);
       let lit = 0;
-      for (let col = a; col <= b; col++) lit += colHist[col];
+      for (let i = 0; i < k; i++) if (u[i] >= uL && u[i] <= uR && v[i] >= vA && v[i] <= vB && !lineRows[rowOf(i)]) lit++;
       if (lit * stride > 0.006 * H * H) return fail('stray-digit');
       // Nothing faint there either: glare can wash a digit out below the threshold.
       // An over-exposed digit that hot mode missed (its core not enclosed by glow)
@@ -787,9 +861,9 @@ export function readDigits(rgba, w, h, opts = {}) {
         }
         return c;
       };
-      if (faint(uL, uR, top, bottom) > 0.02 * H * H) return fail('stray-digit');
+      if (faint(uL, uR, vA, vB) > 0.02 * H * H) return fail('stray-digit');
       // every digit lights the upper part of the right of its cell (b, or the a bar)
-      if (faint(Rn + P - 0.6 * Wd, uRR, top, top + 0.5 * H) > 0.01 * H * H) return fail('stray-digit');
+      if (faint(Rn + P - 0.6 * Wd, uRR, vA, top + 0.5 * H) > 0.01 * H * H) return fail('stray-digit');
     }
   }
 

@@ -78,6 +78,15 @@ Each analysed frame (10 per second) goes through these steps:
 
 **Over-exposed displays.** Photographed from the floor, the real scale's digits are so bright that the camera records **white/cream lines inside a red glow**. To the redness image the digits are then holes. A second mode handles this. It reads the white cores that are enclosed by red glow on both sides; a light bezel or a yellow beam next to the display has red on one side at most. The mode switches itself off unless the cores really are white-hot: the green channel reaches about 220 on the real display and about 80 on a normally exposed one. Conversely, red mode refuses digits with white-hot cores and leaves them to this mode. In red terms it is the glow that is lit, and the glow around a "3" can fill in an "8". In *Auto*, the reader tries red digits, then over-exposed, then any bright digits, starting with whichever worked last.
 
+Two more things the real display does:
+- **A bright line under the digits.** The window's lower lip reflects the glow as a thin line touching every digit, which glues the whole number into one shape.
+  - A row at the top or bottom edge of the digits holding an unbroken lit run longer than 1.5 digit heights must be such a line, because no digit has a bar that long.
+  - Such rows are taken out before anything else, so the line can neither glue the digits together nor outweigh them when the reader finds the digit band.
+  - Only rows that themselves hold such a run go, so the bars the line touches keep the rest of their pixels.
+  - Taking a line out can hide part of a bar but never create one. Next to a removed line, a clearly lit top or bottom bar still counts, while a faint or missing one is ignored.
+  - A "1" is refused if a line was just above the digits, since it could be a "7" whose top bar was hidden.
+- **Digits that touch.** With bold, glowing strokes, a "2" and a "5" can run into each other. They are still cut apart by recognition. A digit's width is judged against a full digit cell (about 0.58 digit heights), not against whichever narrow "7" happens to stand alone.
+
 A reading is accepted only if it lies in the plausible range and is a multiple of 50 kg, plus these checks:
 
 - **No digit is ever silently dropped.**
