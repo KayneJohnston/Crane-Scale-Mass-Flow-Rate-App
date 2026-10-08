@@ -2,7 +2,7 @@
 
 import { loadSettings, saveSettings, resetSettings, SCHEMA, engineConfig, readerConfig, parseWindows, powerProfile } from './settings.js';
 import { TapEngine } from './analysis/engine.js';
-import { analyseSession } from './analysis/offline.js';
+import { analyseSession, ANALYSIS_VERSION } from './analysis/offline.js';
 import { TapSimulator } from './analysis/sim.js';
 import { renderDisplay, mulberry32 } from './vision/render7seg.js';
 import { Camera, WakeLock } from './camera.js';
@@ -12,7 +12,7 @@ import { Beeper } from './audio.js';
 import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js';
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
 
-export const VERSION = '0.3.3';
+export const VERSION = '0.3.4';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -872,7 +872,7 @@ function sessionSpec(s) {
           { type: 'vspan', spans, color: COLORS.s1, alpha: 0.08 },
           { type: 'band', y0: tgt * (1 - tol / 100), y1: tgt * (1 + tol / 100), mid: tgt, color: COLORS.good, alpha: 0.16, label: `Target ±${tol}%` },
           { type: 'area', xs: sm.t, lo, hi, color: COLORS.s1, alpha: 0.18, gap: 3 },
-          { type: 'line', xs: sm.t, ys: sm.rate, color: COLORS.s1, label: '30 s rate', gap: 3 },
+          { type: 'line', xs: sm.t, ys: sm.rate, color: COLORS.s1, label: 'Smoothed rate', gap: 3 },
         ],
       },
     ],
@@ -901,10 +901,18 @@ let openSessionObj = null;
 
 function verdictText(v) { return v === 'fast' ? 'too fast' : v === 'slow' ? 'too slow' : v === 'ok' ? 'on target' : ''; }
 
+// Taps saved before the analysis last improved are analysed again (and saved).
+function freshen(s) {
+  if (!s?.meas || s.status === 'active' || s.analysis?.version === ANALYSIS_VERSION) return false;
+  s.analysis = analyseSession(s);
+  return true;
+}
+
 async function renderHistory() {
   const box = $('historyList');
   let list = [];
   try { list = await store.all(); } catch (e) { console.warn(e); }
+  for (const s of list) if (freshen(s)) store.put(s).catch(() => {});
   box.replaceChildren();
   if (!list.length) {
     const p = document.createElement('div'); p.className = 'empty';
@@ -952,7 +960,8 @@ function statRow(tbl, k, v) {
 async function openSession(id) {
   const s = await store.get(id);
   if (!s) return;
-  if (!s.analysis) s.analysis = analyseSession(s);
+  if (freshen(s)) store.put(s).catch(() => {});
+  else if (!s.analysis) s.analysis = analyseSession(s); // still being recorded
   openSessionObj = s;
   const d = new Date(s.wall0);
   $('sesTitle').textContent = `${d.toLocaleDateString()} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}${s.source && s.source !== 'camera' ? ' · ' + s.source : ''}`;
@@ -1193,6 +1202,7 @@ function wire() {
   $('btnExportAll').addEventListener('click', async () => {
     const all = await store.all();
     if (!all.length) { toast('Nothing to export yet'); return; }
+    for (const s of all) if (freshen(s)) store.put(s).catch(() => {});
     shareOrDownload(`tap-rate-summary-${datestamp()}.csv`, summaryCSV(all));
   });
   $('btnBackup').addEventListener('click', async () => {
@@ -1207,7 +1217,7 @@ function wire() {
       const data = JSON.parse(await f.text());
       const list = Array.isArray(data) ? data : data.sessions || [];
       let n = 0;
-      for (const s of list) if (s && s.id && Array.isArray(s.meas)) { if (!s.analysis) s.analysis = analyseSession(s); await store.put(s); n++; }
+      for (const s of list) if (s && s.id && Array.isArray(s.meas)) { if (s.status === 'active') s.status = 'interrupted'; freshen(s); await store.put(s); n++; }
       toast(`Imported ${n} recording${n === 1 ? '' : 's'}`);
       renderHistory();
     } catch (err) { toast(`Import failed: ${err.message}`); }

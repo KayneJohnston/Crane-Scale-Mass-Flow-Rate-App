@@ -6,9 +6,17 @@
 //     the median level before it (crane swing averages out, touches excluded);
 //   * average rate = mass delivered / tap duration   (the definition of an average
 //     flow rate, not a regression slope);
-//   * a smoothed rate curve: centred 30 s Theil–Sen slope.
+//   * the rate through the tap: the live filter's model run forward and then
+//     backward over the tap's readings (two-pass smoother), so each moment's rate
+//     uses the readings after it as well as before - no lag, about half the error
+//     of the live estimate - from the level before the tap to the level after it.
+//     Between taps: centred 30 s Theil–Sen slope.
 
 import { robustSlope, hingeOnset, hingeStop, median, lowerBound } from './stats.js';
+import { smoothRate, rateVarToS } from './kalman.js';
+
+// bump when the analysis changes, so saved taps are analysed again
+export const ANALYSIS_VERSION = 2;
 
 export const OFFLINE_DEFAULTS = {
   onKgMin: 150,
@@ -17,6 +25,7 @@ export const OFFLINE_DEFAULTS = {
   minSegKg: 150,
   halfWin: 15,
   levelWin: 20,
+  edgeSec: 5,          // time in band: leave out the first and last seconds of a tap
 };
 
 const ACCEPTED = new Set([0, 1, 2]);
@@ -48,24 +57,25 @@ export function analyseSession(sess, opts = {}) {
   const acc = screenPre(sess.meas || []);
   const t = acc.map((r) => r.t), z = acc.map((r) => r.z);
   const n = t.length;
-  const result = { segments: [], totals: null, smooth: { t: [], rate: [], ci: [] }, coverage: null };
+  const result = { version: ANALYSIS_VERSION, segments: [], totals: null, smooth: { t: [], rate: [], ci: [] }, coverage: null };
   const nMeas = (sess.meas || []).length;
   const dur = sess.duration || (nMeas ? sess.meas[nMeas - 1].t : 0);
   result.coverage = dur > 0 ? Math.min(1, (nMeas * (cfg.binSec ?? 0.5)) / dur) : null;
   if (n < 10) return finish(result, sess, hi, lo);
 
-  // smoothed rate curve
-  for (let tc = t[0] + 2; tc <= t[n - 1] - 2; tc += 1) {
-    const i0 = lowerBound(t, tc - o.halfWin), i1 = lowerBound(t, tc + o.halfWin);
-    if (i1 - i0 < 10) continue;
-    const f = robustSlope(t, z, i0, i1, { sigmaFloor });
-    if (!f) continue;
-    result.smooth.t.push(tc);
-    result.smooth.rate.push(f.slope * 60);
-    result.smooth.ci.push(1.645 * f.se * 60);
+  // centred 30 s slopes (only within [a, b]): find the taps, and the rate between them
+  const slope30 = (tc, a = -Infinity, b = Infinity) => {
+    const i0 = lowerBound(t, Math.max(a, tc - o.halfWin)), i1 = lowerBound(t, Math.min(b, tc + o.halfWin));
+    return i1 - i0 >= 10 ? robustSlope(t, z, i0, i1, { sigmaFloor }) : null;
+  };
+  const grid = [];
+  for (let tc = t[0] + 2; tc <= t[n - 1] - 2; tc += 1) grid.push(tc);
+  const S = { t: [], rate: [] };
+  for (const tc of grid) {
+    const f = slope30(tc);
+    if (f) { S.t.push(tc); S.rate.push(f.slope * 60); }
   }
-  // flow segments from the smoothed rate
-  const S = result.smooth;
+  // flow segments from the 30 s rate
   let runs = [];
   for (let i = 0, s = -1; i <= S.t.length; i++) {
     const on = i < S.t.length && S.rate[i] >= o.onKgMin;
@@ -80,6 +90,8 @@ export function analyseSession(sess, opts = {}) {
   if (!runs.length && sess.segments?.length) runs = sess.segments.map((s) => [s.onset, s.end ?? t[n - 1]]);
 
   const touches = (sess.events || []).filter((e) => e.type === 'touch-end');
+  const Sq = rateVarToS(cfg.rateVar ?? 100);
+  const curves = [];
   for (const [rs, re] of runs) {
     // refine the start: flat-then-rising change point
     let a0 = lowerBound(t, rs - 45), a1 = lowerBound(t, Math.min(re, rs + 40));
@@ -114,16 +126,29 @@ export function analyseSession(sess, opts = {}) {
     const seLvl = (k) => 1.2533 * sig / Math.sqrt(Math.max(1, (k || 6) / 3));
     const seDm = Math.hypot(seLvl(before?.n), seLvl(after?.n));
     const seAvg = Math.hypot((seDm / dt) * 60, (avg * Math.SQRT2) / dt);
-    // time spent above / within / below the band (smoothed rate)
+    // the rate through the tap, from the level before to the level after
+    const R = sig * sig;
+    const anchor = (lvl) => (lvl ? seLvl(lvl.n) ** 2 : R);
+    const curve = tapCurve(acc, onset, end, levelBefore, anchor(before), levelAfter, openEnd ? R : anchor(after), avg, R, Sq);
+    if (curve) curves.push(curve);
+    // time spent above / within / below the band
     let nHi = 0, nLo = 0, nOk = 0, peak60 = null;
-    for (let i = 0; i < S.t.length; i++) {
-      if (S.t[i] < onset + o.halfWin || S.t[i] > end - o.halfWin) continue;
-      if (S.rate[i] > hi) nHi++; else if (S.rate[i] < lo) nLo++; else nOk++;
+    for (const tc of grid) {
+      if (tc < onset + o.edgeSec || tc > end - o.edgeSec) continue;
+      const r = curve ? curveAt(curve, tc).rate : slope30(tc)?.slope * 60;
+      if (r == null || !Number.isFinite(r)) continue;
+      if (r > hi) nHi++; else if (r < lo) nLo++; else nOk++;
     }
-    for (let tc = onset + 60; tc <= end + 0.01; tc += 5) {
-      const i0 = lowerBound(t, tc - 60), i1 = lowerBound(t, tc);
-      const f = i1 - i0 >= 20 ? robustSlope(t, z, i0, i1, { sigmaFloor }) : null;
-      if (f && (peak60 == null || f.slope * 60 > peak60)) peak60 = f.slope * 60;
+    // highest 60 s average rate: what the smoothed weight gained in the best minute
+    for (let tc = onset + 60; tc <= end + 0.01; tc += curve ? 1 : 5) {
+      let r = null;
+      if (curve) r = curveAt(curve, tc).m - curveAt(curve, tc - 60).m;
+      else {
+        const i0 = lowerBound(t, tc - 60), i1 = lowerBound(t, tc);
+        const f = i1 - i0 >= 20 ? robustSlope(t, z, i0, i1, { sigmaFloor }) : null;
+        if (f) r = f.slope * 60;
+      }
+      if (r != null && (peak60 == null || r > peak60)) peak60 = r;
     }
     const nTot = nHi + nLo + nOk;
     const segTouches = touches.filter((e) => e.t >= onset && e.t <= end + 5);
@@ -142,7 +167,47 @@ export function analyseSession(sess, opts = {}) {
       verdict: avg > hi ? 'fast' : avg < lo ? 'slow' : 'ok',
     });
   }
+  // the final curve: the smoothed rate inside the taps, 30 s slopes between them that
+  // don't reach into a tap (no ramp drawn before a tap starts or after it ends)
+  for (const tc of grid) {
+    const c = curves.find((k) => tc >= k.t0 && tc <= k.t1);
+    if (c) {
+      const v = curveAt(c, tc);
+      result.smooth.t.push(tc); result.smooth.rate.push(v.rate); result.smooth.ci.push(v.ci);
+      continue;
+    }
+    let a = -Infinity, b = Infinity;
+    for (const k of curves) { if (k.t1 < tc) a = Math.max(a, k.t1); if (k.t0 > tc) b = Math.min(b, k.t0); }
+    const f = slope30(tc, a, b);
+    if (!f) continue;
+    result.smooth.t.push(tc); result.smooth.rate.push(f.slope * 60); result.smooth.ci.push(1.645 * f.se * 60);
+  }
   return finish(result, sess, hi, lo);
+}
+
+// Two-pass smoother over the readings of one tap, pinned to the level before it at
+// the start and the level after it at the end (so the curve agrees with the tap's
+// average rate). Readings the live filter down-weighted keep their lower weight.
+function tapCurve(acc, onset, end, before, varBefore, after, varAfter, avgKgMin, R, Sq) {
+  const ts = [onset], zs = [before], rs = [varBefore];
+  for (const r of acc) {
+    if (r.t <= onset || r.t >= end) continue;
+    ts.push(r.t); zs.push(r.z); rs.push(R / (r.w || 1));
+  }
+  if (ts.length < 11) return null;
+  ts.push(end); zs.push(after); rs.push(varAfter);
+  const q0 = Math.max(0, avgKgMin) / 60;
+  const sm = smoothRate(Sq, ts, zs, rs, { t: onset, m: before, q: q0, Pmm: 1e6, Pqq: q0 * q0 + 1 });
+  return { t0: onset, t1: end, ts, q: sm.map((x) => x.q), sdq: sm.map((x) => x.sdq), m: sm.map((x) => x.m) };
+}
+
+// the curve at time tc (linear between readings): rate and 90% interval in kg/min, mass in kg
+function curveAt(c, tc) {
+  const i = Math.min(c.ts.length - 1, Math.max(1, lowerBound(c.ts, tc)));
+  const t0 = c.ts[i - 1], t1 = c.ts[i];
+  const u = t1 > t0 ? Math.min(1, Math.max(0, (tc - t0) / (t1 - t0))) : 1;
+  const lin = (a) => a[i - 1] + u * (a[i] - a[i - 1]);
+  return { rate: lin(c.q) * 60, ci: 1.645 * lin(c.sdq) * 60, m: lin(c.m) };
 }
 
 function finish(result, sess, hi, lo) {

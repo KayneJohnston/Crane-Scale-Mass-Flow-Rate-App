@@ -40,6 +40,29 @@ test('post-tap analysis recovers delivered mass and average rate', () => {
   }
 });
 
+test('after the tap, the rate curve follows the true rate without lag', () => {
+  // the saved tap's curve (two-pass smoother) against the live filter, over the whole tap
+  let se = 0, seLive = 0, n = 0, inBand = 0;
+  for (const seed of [1, 2, 3, 4, 5]) {
+    const { sim, ended, trace } = runSim(seed);
+    const s = ended[0];
+    const T0 = (s.wall0 - W0) / 1000;
+    const a = analyseSession(s);
+    const live = new Map(trace.map((p) => [Math.round(p.t * 2), p.est]));
+    a.smooth.t.forEach((tc, i) => {
+      const tt = T0 + tc;
+      const k = Math.round(tt * 2);
+      if (tt < sim.tapStart + 5 || tt > sim.tapEnd - 5 || sim.inTouch(tt) || !live.has(k)) return;
+      const tr = sim.trueRate(tt);
+      se += ((a.smooth.rate[i] - tr) / tr) ** 2; seLive += ((live.get(k) - tr) / tr) ** 2; n++;
+      if (Math.abs(a.smooth.rate[i] - tr) <= a.smooth.ci[i]) inBand++;
+    });
+  }
+  const rms = Math.sqrt(se / n), rmsLive = Math.sqrt(seLive / n);
+  assert.ok(rms < 0.035 && rms < 0.6 * rmsLive, `curve ${(100 * rms).toFixed(1)}% vs live ${(100 * rmsLive).toFixed(1)}%`);
+  assert.ok(inBand / n > 0.85, `90% band covers ${(100 * inBand / n).toFixed(0)}%`);
+});
+
 test('a crucible filled from two pots gives one session with two taps', () => {
   const { sim, ended } = runSim(6, { taps: [{ mass: 3600 }, { mass: 3300, rate0: 700, rateEnd: 580 }], gapSec: 60 });
   assert.equal(ended.length, 1);

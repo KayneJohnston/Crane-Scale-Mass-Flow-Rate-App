@@ -182,6 +182,18 @@ That is why the main number uses the filter, which combines all the data optimal
 
 The ± combines the uncertainty of both levels with ±1 s on each change-point. On simulated 6-minute taps the delivered mass comes out exact and the average is within about 0.5%.
 
+**The rate through the tap** (the History chart, "time fast / on target / slow", the highest 60 s rate and the smoothed-rate column of the CSV) comes from a **two-pass smoother**. The live filter's model is run over the tap's readings forward and then backward, so the rate at each moment uses the readings after it as well as before. A live filter has to lag behind a changing rate; this curve doesn't. It is pinned to the level before the tap at its start and the level after it at its end, so it agrees with the tap's average rate. Touches and misreads that the live filter rejected stay out.
+
+On 40 simulated taps:
+
+| | Before (30 s slopes) | Two-pass smoother |
+|---|---|---|
+| Rate curve vs the true rate | 6.0% | 2.8% |
+| Time fast / on target / slow | ±5.0 points | ±3.8 points |
+| Highest 60 s rate | 1.3% | 0.7% |
+
+Its ±90% band held the true rate 95% of the time. Taps saved with an earlier version are analysed again when History opens.
+
 ### 3.8 Colours
 **Green** = inside target ±10%. **Red** = outside, with 1% hysteresis so it doesn't flicker. It is **solid** when the 90% interval is entirely on one side of the band edge, and **striped** when the evidence isn't conclusive yet. Beeps sound when red is certain, or after it has been "likely red" for 8 s.
 
@@ -234,7 +246,7 @@ js/vision/sevenseg.js      seven-segment locator + reader (pure functions on RGB
 js/vision/pipeline.js      two-stage frame reader, sampler-agnostic
 js/vision/tracker.js       checks each reading against the previous ones (temporal prior)
 js/analysis/engine.js      binning, robust Kalman, windows, flow on/off, auto start/stop
-js/analysis/kalman.js      local linear trend Kalman filter
+js/analysis/kalman.js      local linear trend Kalman filter and two-pass smoother
 js/analysis/stats.js       Theil–Sen + SE, hinge change-points, robust noise
 js/analysis/offline.js     per-tap results after a recording
 js/analysis/sim.js         realistic tap simulator (noise, swing, touches, misreads)

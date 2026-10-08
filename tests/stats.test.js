@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { robustSlope, hingeOnset, hingeStop, secondDiffSigma, median, madSigma } from '../js/analysis/stats.js';
-import { RateKF, rateVarToS } from '../js/analysis/kalman.js';
+import { RateKF, rateVarToS, smoothRate } from '../js/analysis/kalman.js';
 import { mulberry32 } from '../js/vision/render7seg.js';
 
 const gauss = (r) => Math.sqrt(-2 * Math.log(r() || 1e-12)) * Math.cos(2 * Math.PI * r());
@@ -76,4 +76,26 @@ test('Kalman filter tracks a ramp from quantised noisy readings', () => {
   }
   assert.ok(Math.abs(kf.q - 10) < 1.5, `rate ${kf.q}`);
   assert.ok(Math.sqrt(kf.Pqq) < 1.5);
+});
+
+test('two-pass smoother: the rate at every moment, with an honest uncertainty', () => {
+  // a rate that changes during the tap (12 -> 8 kg/s), quantised noisy readings
+  const r = mulberry32(11);
+  const rate = (t) => (t < 100 ? 12 : t < 140 ? 12 - (t - 100) / 10 : 8);
+  let m = 15000;
+  const ts = [], zs = [], rs = [], truth = [];
+  for (let i = 1; i <= 480; i++) {
+    const t = i * 0.5;
+    m += rate(t) * 0.5;
+    ts.push(t); zs.push(q50(m + 30 * gauss(r))); rs.push(30 * 30 + 208); truth.push(rate(t));
+  }
+  const kf = new RateKF(rateVarToS(100));
+  kf.init(0, 15000, 10, 2500, 100);
+  const live = ts.map((t, i) => { kf.predict(t); kf.update(zs[i], rs[i]); return kf.q; });
+  const sm = smoothRate(rateVarToS(100), ts, zs, rs, { t: 0, m: 15000, q: 10, Pmm: 2500, Pqq: 100 });
+  const err = (q) => Math.sqrt(q.reduce((a, x, i) => a + (x - truth[i]) ** 2, 0) / q.length);
+  const eSm = err(sm.map((x) => x.q)), eLive = err(live);
+  assert.ok(eSm < 0.6 * eLive, `smoothed ${eSm.toFixed(2)} vs live ${eLive.toFixed(2)} kg/s`);
+  const cover = sm.filter((x, i) => Math.abs(x.q - truth[i]) <= 1.645 * x.sdq).length / sm.length;
+  assert.ok(cover > 0.8 && cover <= 1, `90% band covers ${cover}`);
 });

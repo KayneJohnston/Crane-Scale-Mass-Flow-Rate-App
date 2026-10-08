@@ -42,16 +42,31 @@ function metaLines(sess) {
   return lines;
 }
 
+// the after-tap rate curve at time t (linear between its 1 s points, blank in its gaps)
+function curveAt(sm, t) {
+  const n = sm?.t?.length || 0;
+  if (n < 2) return null;
+  let lo = 0, hi = n;
+  while (lo < hi) { const mid = (lo + hi) >> 1; if (sm.t[mid] < t) lo = mid + 1; else hi = mid; }
+  const i = Math.min(Math.max(lo, 1), n - 1);
+  const t0 = sm.t[i - 1], t1 = sm.t[i];
+  if (t < t0 - 0.5 || t > t1 + 0.5 || t1 - t0 > 1.5) return null;
+  const u = Math.min(1, Math.max(0, (t - t0) / (t1 - t0)));
+  return { rate: sm.rate[i - 1] + u * (sm.rate[i] - sm.rate[i - 1]), ci: sm.ci[i - 1] + u * (sm.ci[i] - sm.ci[i - 1]) };
+}
+
 /** One row per 0.5 s measurement (median of the camera frames in that half second). */
 export function sessionCSV(sess) {
   const w = sess.config?.windows || [20, 40, 60, 120];
-  const head = ['time_s', 'clock', 'reading_kg', 'frames', 'flag', 'kalman_mass_kg', 'kalman_rate_kg_min', 'kalman_rate_ci90', ...w.map((x) => `rate_${x}s_kg_min`), 'level_10s_kg', 'status'];
+  const head = ['time_s', 'clock', 'reading_kg', 'frames', 'flag', 'kalman_mass_kg', 'kalman_rate_kg_min', 'kalman_rate_ci90', ...w.map((x) => `rate_${x}s_kg_min`), 'level_10s_kg', 'status', 'smoothed_rate_kg_min', 'smoothed_rate_ci90'];
   const rows = [...metaLines(sess), head.join(',')];
   for (const r of sess.meas || []) {
+    const c = curveAt(sess.analysis?.smooth, r.t);
     rows.push([
       r.t, local(sess.wall0 + r.t * 1000), r.z, r.n, FLAG_NAMES[r.f] ?? r.f,
       r.m ?? '', r.q != null ? Math.round(r.q * 600) / 10 : '', r.qs != null ? Math.round(r.qs * 60 * 1.645) : '',
       ...w.map((x) => r['r' + x] ?? ''), r.L ?? '', r.st != null ? STATUS_NAMES[r.st] : '',
+      c ? Math.round(c.rate * 10) / 10 : '', c ? Math.round(c.ci) : '',
     ].map(esc).join(','));
   }
   return rows.join('\n') + '\n';
