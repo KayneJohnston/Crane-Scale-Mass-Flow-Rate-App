@@ -137,14 +137,25 @@ Frames arrive about 10 times a second and the weight changes slowly. So each new
 - **Inside the band** → accepted.
 - **Clear but far away** (e.g. 20050, 20050, 20050, 20050, then **19050**) → not believed on one frame, and never rewritten either. It must repeat on **3 consecutive frames** first. That covers a real drop when the crucible touches the cell, or a return to a recently seen level. A jump *above* anything seen recently is physically impossible for metal pouring in, and a drop of more than 5,000 kg is more likely a misread than a touch, so these must persist for **3 s**. The badge shows "Checking 19,050…" meanwhile.
 - **A digit lost or added** (17,000 read as 1,700 when a "0" drowns in the glow, or as 7,000 when the "1" does) → refused however often it repeats. The badge shows "Ignoring 1,700 — digit lost?". The last value is remembered for a minute after the readings stop, so such a reading can't take over when the history is started afresh either. A genuine change of the weight almost never lands exactly on the expected value with a digit missing.
-- **Unclear frames** are those the reader couldn't decide on its own: a "7" that might be a "9", or a faint segment. For these the reader reports how well the glyphs fit every digit 0–9. The frame is resolved, shown as "≈20,050 kg", only if all of these hold:
-  - the best-fitting value in the wider neighbourhood lies **inside** the band;
-  - it fits clearly better than the runner-up (14600 vs 14800 is not guessed);
-  - readings are steady (the band is at most ±200 kg);
+- **Unclear frames** are those the reader couldn't decide on its own: a "7" that might be a "9", or a glowing 8 that might be a 0. For these the app works out the probability of **every value the display could show** (1,000, 1,050, … 40,000 kg), by Bayes' rule:
+
+  > P(value | frame) ∝ P(frame | value) × P(value)
+  > &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;the picture &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;dead reckoning
+
+  - *The picture*: for each glyph the reader measures how much of each segment is lit and how badly that fits each digit 0–9. A value's misfit is the sum over its digits, and each segment that doesn't fit makes the value about 50 times less likely. That scale was fitted on 3,500 unclear readings with known values (`tools/lattice-calib.mjs`), so the probabilities come out right on average: values given 90–95% were right 96% of the time. A value with one digit more or fewer than the glyphs keeps a small chance (a "1" lost in the glow).
+  - *Dead reckoning*: the band around the prediction, flat inside and fading over a display step outside. A touch the camera didn't see keeps 3% (spread over the 2,000 kg below the band), and anything else 0.5%.
+  - Example: 18,000 on the display, its 8 glowing so badly that the picture alone gives 18,000 only 81% (19,000 4%, 10,000 2.5%, …). With the readings expecting 17,900–18,150, 18,000 is 99.98% likely. If the picture can't tell 8 from 9 in the hundreds (18,800 vs 18,900), both are in the band and the frame stays unread.
+
+  The frame is shown as its most probable value, "≈18,050 kg · 99.2%", only if all of these hold:
+  - the value is at least **95% probable**, or 98% if no clear reading came through in the last 2 s;
+  - its digits fit nearly as well as the frame's best reading, and none fits badly;
+  - it is in or next to the band, and readings are steady (the band is at most ±200 kg): a value further off is a change of the weight, which clear readings must confirm;
   - no jump is being checked;
   - a clear reading came through in the last 20 s (a long run of guesses could drift off).
-- **When the readings stop**, the band must allow for the fastest metal could pour (3,000 kg/min), so after 2–3 s it is too wide to resolve anything, and after about 8 s the history is discarded. During a recording the tap-rate filter (section 3.4) knows better: the weight can't fall below the last accepted readings and rises at the measured rate, give or take its uncertainty and the noise. That range takes over from the history: unclear frames are still resolved against it, as above, and a clear reading inside it is taken at once. In simulated taps the display was inside this range 99.9% of the time, about ±125 kg wide. It allows for a display that holds its value for several seconds and then catches up. During a touch the range isn't used, and since a touch could also have started while nothing was readable, the runner-up an unclear frame must beat then includes every value down to 2,000 kg lower: a frame isn't "corrected" up to the expected weight while the crucible rests on the cell unseen.
-- **How much this helps, and what it risks.** `tools/tracker-sim.mjs` runs the reading decisions over 60 simulated taps with a deliberately pessimistic reader: in spells of 8–30 s every 8 and 1 is doubtful, often looks more like a neighbouring digit than itself, and 8% of frames lose a digit. In those spells the tap rate's range lifts the frames given a value from 6% to 9.5%. Wrong values go from 0.050% to 0.058% of all frames, four in five of them off by 150 kg or less. With the previous version's checks, 0.8% of these frames got a wrong value: after the history went stale they locked onto readings with a lost digit.
+
+  The debug panel lists the three most probable values of every frame. On 3,700 unclear readings with known values (each tried with the prediction 0–100 kg off), this resolves as many as the previous rule (55%) with fewer wrong (10 instead of 14).
+- **When the readings stop**, the band must allow for the fastest metal could pour (3,000 kg/min), so after 2–3 s it is too wide to resolve anything, and after about 8 s the history is discarded. During a recording the tap-rate filter (section 3.4) knows better: the weight can't fall below the last accepted readings and rises at the measured rate, give or take its uncertainty and the noise. That range takes over from the history as the dead-reckoning part: unclear frames are still resolved with it, as above, and a clear reading inside it is taken at once. In simulated taps the display was inside this range 99.9% of the time, about ±125 kg wide. It allows for a display that holds its value for several seconds and then catches up. During a touch the range isn't used.
+- **How much this helps, and what it risks.** `tools/tracker-sim.mjs` runs the reading decisions over 60 simulated taps with a deliberately pessimistic reader: in spells of 8–30 s every 8 and 1 is doubtful, often looks more like a neighbouring digit than itself, and 8% of frames lose a digit. In those spells the tap rate's range lifts the frames given a value from 6% to 10%. Wrong values go from 0.050% to 0.060% of all frames, most of them off by one 50 or 100 kg step. Checks without the digit-slip guard got 0.8% of these frames wrong: after the history went stale they locked onto readings with a lost digit.
 - Without a recording, after about 8 s without a reading (phone lowered) the app locks on afresh from 2 consistent frames.
 
 Each raw frame in the frames CSV records which of these happened. *Settings → Camera & vision* can switch the check off or change the 3 frames.
@@ -242,7 +253,7 @@ Settings that may matter:
 | `rate_20s_kg_min` … | window rates as shown on the tiles |
 | `level_10s_kg`, `status` | robust current level; indicator state shown |
 
-**`…_frames.csv`**: every analysed camera frame (time, value or blank, confidence, decision: `ok`, `prior`, `locked`, `jump-accepted`, `jump-pending`, `locking`, `digit-slip`, `unread`).
+**`…_frames.csv`**: every analysed camera frame (time, value or blank, confidence, decision: `ok`, `prior`, `locked`, `jump-accepted`, `jump-pending`, `locking`, `digit-slip`, `unread`). For a `prior` frame (an unclear one resolved with the prediction) the confidence is the probability of the value given.
 
 **`tap-rate-summary-….csv`**: one row per tap across all recordings (date, pots, crucible, crew, start, end, mass, average, ±, verdict, peak 60 s, % fast/ok/slow, touches).
 
@@ -258,6 +269,7 @@ js/main.js                 controller: camera/video/demo -> reader -> engine -> 
 js/vision/sevenseg.js      seven-segment locator + reader (pure functions on RGBA)
 js/vision/pipeline.js      two-stage frame reader, sampler-agnostic
 js/vision/tracker.js       checks each reading against the previous ones (temporal prior)
+js/vision/posterior.js     probability of every value: the picture x dead reckoning
 js/analysis/engine.js      binning, robust Kalman, windows, flow on/off, auto start/stop
 js/analysis/kalman.js      local linear trend Kalman filter and two-pass smoother
 js/analysis/stats.js       robust slope (Theil–Sen screen + least squares) + SE, hinge change-points, robust noise
@@ -277,6 +289,7 @@ node tools/vision-eval.mjs 500 --hot --dashes # ... with dashes between the digi
 node tools/real-debug.mjs photo.jpg out/   # what the reader sees in a real photo (PNG, or JPEG via ffmpeg)
 node tools/sequence-eval.mjs 8 --hard # frame sequences: independent reading vs. with the tracker
 node tools/tracker-sim.mjs 20         # reading decisions on simulated taps, with/without the tap engine's expectation
+node tools/lattice-calib.mjs unclear out.jsonl 500 && node tools/lattice-calib.mjs fit out.jsonl   # how far digit costs are probabilities
 node tools/engine-run.mjs 3           # one simulated tap through the engine
 node tools/filter-bench/run.mjs       # live-rate benchmark: 20 estimators vs the Kalman filter (~3 min)
 node tests/e2e/smoke.mjs out/         # headless Chromium: demo -> history

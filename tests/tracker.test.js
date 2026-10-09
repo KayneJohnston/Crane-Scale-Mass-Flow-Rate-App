@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DisplayTracker, bestInBand, digitSlip } from '../js/vision/tracker.js';
+import { DisplayTracker, digitSlip, TRACK_DEFAULTS } from '../js/vision/tracker.js';
+import { valuePosterior } from '../js/vision/posterior.js';
 import { TEMPLATES } from '../js/vision/sevenseg.js';
 
 const CFG = { minKg: 10000, maxKg: 30000, stepKg: 50, multiplier: 1 };
@@ -116,11 +117,20 @@ test('history goes stale after a long gap and has to lock on again', () => {
   assert.equal(tr.decide(20, [clear(21000)], CFG).how, 'locking');
 });
 
-test('bestInBand picks the cheapest value near the prediction', () => {
-  const b = bestInBand(lattice('20150'), { value: 20100, band: 150 }, CFG);
+test('valuePosterior: the picture and the prediction combined into a probability per value', () => {
+  const C = { ...TRACK_DEFAULTS, ...CFG };
+  const b = valuePosterior(lattice('20150'), { value: 20100, band: 150 }, C);
   assert.equal(b.v, 20150);
-  assert.equal(b.inBand, true);
-  assert.ok(Math.abs(b.excess) < 1e-9);
+  assert.ok(b.p > 0.999 && Math.abs(b.excess) < 1e-9 && b.sameLength);
+  assert.ok(Math.abs(b.top.reduce((s, x) => s + x.p, 0) - 1) < 0.01);
+  // an 8 that might be a 9: the picture alone can't tell 18000 from 19000 ...
+  const lat = lattice('18000', { 1: { 8: 1.2, 9: 1.3 } });
+  const alone = valuePosterior(lat, null, C);
+  assert.ok(alone.p < 0.6, `picture alone ${alone.p}`);
+  // ... the dead reckoning can
+  const both = valuePosterior(lat, { value: 18000, band: 150 }, C);
+  assert.equal(both.v, 18000);
+  assert.ok(both.p > 0.995, `with the prediction ${both.p}`);
 });
 
 test('a better fit just outside the band blocks the rescue', () => {
@@ -229,11 +239,13 @@ test('the expectation takes over from a band widened by unread frames', () => {
 });
 
 test('an unseen touch is not "corrected" up to the expected weight', () => {
-  // the history went stale; meanwhile a touch pulled the display down to 16000, and
-  // its 6 looks a little like an 8: 18000 is expected, but 16000 fits about as well
-  const lat = lattice('16000', { 1: { 6: 1.2, 8: 1.0 } });
+  // the history went stale; meanwhile a touch pulled the display down to 16000, and the
+  // picture says 6 rather than 8: 18000 is expected, but no longer probable enough
+  const lat = lattice('16000', { 1: { 6: 0.6, 8: 1.4 } });
   const tr = locked(0, 17950);
-  assert.equal(tr.decide(20, [unread(lat)], CFG, tr.predict(20, CFG, EXPECT)).value, null);
+  const d = tr.decide(20, [unread(lat)], CFG, tr.predict(20, CFG, EXPECT));
+  assert.equal(d.value, null);
+  assert.ok(d.near.p < 0.95, `${d.near.v}: ${d.near.p}`);
 });
 
 test('no more guessing after 20 s without one clear reading', () => {

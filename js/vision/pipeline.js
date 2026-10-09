@@ -7,7 +7,8 @@
 // browser this is canvas.drawImage(); in Node it is sampler.js.
 
 import { locateDisplay, readDigits, validateReading, expectedDigits, decodeLattice, READ_DEFAULTS } from './sevenseg.js';
-import { DisplayTracker, TRACK_DEFAULTS, bestInBand } from './tracker.js';
+import { DisplayTracker, TRACK_DEFAULTS } from './tracker.js';
+import { valuePosterior } from './posterior.js';
 
 export const PIPE_DEFAULTS = {
   searchW: 400,        // width of the downscaled search image
@@ -36,7 +37,7 @@ const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
  * `track` persists between frames (display position, reading history);
  * `t` is the frame time in seconds (enables the temporal consistency checks);
  * `cfg.expect` (optional, from TapEngine.expectation) is where the tap engine expects the weight.
- * Result: {ok, value, how, reason, located, quads, ...}; `how` is one of
+ * Result: {ok, value, how, reason, located, quads, candidates, ...}; `how` is one of
  *   ok | prior | locked | jump-accepted                (value given)
  *   locking | jump-pending | digit-slip | unread       (no value)
  */
@@ -60,19 +61,20 @@ export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = nu
     const r = attempt(sample, srcW, srcH, view, c, track, mode);
     attempts.push(r);
     if (r.ok && (pred ? Math.abs(r.value - pred.value) <= pred.band : !tracker?.isSlip(t, r.value, null, c))) break;
-    if (pred && tracker.willRescue(t, bestInBand(r.lattice, pred, c), pred, c)) break;
+    if (pred && tracker.willRescue(t, valuePosterior(r.lattice, pred, c), pred, c)) break;
   }
   const base = attempts.find((r) => r.ok) || attempts.find((r) => r.located) || attempts[0];
   let res = base;
   if (tracker) {
     const d = tracker.decide(t, attempts, c, pred);
     const src = d.from || base;
-    res = { ...src, ok: d.value != null, value: d.value, how: d.how, pred: d.pred, strict: base.ok ? base.value : null };
+    // (candidates: the most probable values given this frame and the prediction)
+    res = { ...src, ok: d.value != null, value: d.value, how: d.how, pred: d.pred, strict: base.ok ? base.value : null, candidates: d.near ? d.near.top : null };
     if (d.how === 'prior') {
       res.located = src.latLocated || src.located;
       res.quads = src.latQuads || src.quads;
       res.text = String(Math.round(d.value / (c.multiplier || 1)));
-      res.conf = Math.min(src.conf || 0.5, 0.5);
+      res.conf = d.near.p; // the probability of the value given
     }
     if (!res.ok) res.reason = d.how === 'unread' ? base.reason : d.how;
     if (res.ok && res.located) {

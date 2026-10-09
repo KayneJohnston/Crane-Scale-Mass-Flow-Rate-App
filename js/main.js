@@ -12,7 +12,7 @@ import { Beeper } from './audio.js';
 import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js';
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
 
-export const VERSION = '0.3.8';
+export const VERSION = '0.3.9';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -548,9 +548,16 @@ function drawOverlay(res, v) {
   }
   const b = $('readingBadge');
   b.hidden = false;
-  // "≈": an unclear frame resolved using the value expected from the previous readings
-  if (res.ok) { b.textContent = `${res.how === 'prior' ? '≈' : ''}${fmtInt(res.value)} kg`; b.classList.remove('bad'); }
+  // "≈": an unclear frame resolved using the value expected from the previous readings,
+  // with how probable that value is
+  if (res.ok) { b.textContent = res.how === 'prior' ? `≈${fmtInt(res.value)} kg · ${probText(res.conf)}` : `${fmtInt(res.value)} kg`; b.classList.remove('bad'); }
   else { b.textContent = reasonText(res); b.classList.add('bad'); }
+}
+
+// 0.9973 -> "99.7%"; never rounds up to 100%
+function probText(p) {
+  const d = p >= 0.99 ? 1 : 0;
+  return `${(Math.floor(p * 100 * 10 ** d) / 10 ** d).toFixed(d)}%`;
 }
 
 function reasonText(res) {
@@ -595,6 +602,7 @@ function drawDebug(res) {
     r?.digits?.length ? 'digits: ' + r.digits.map((g) => `${g.ch}(${g.conf.toFixed(2)})`).join(' ') : '',
     `${app.fps.toFixed(1)} frames/s · ${(res.ms || 0).toFixed(1)} ms/frame · source ${srcDims().join('×')} · zoom ${app.zoomTotal.toFixed(1)}× (lens ${app.hwZoom.toFixed(1)}×)`,
     res.pred ? `history: expect ${fmtInt(res.pred.value)} ±${fmtInt(res.pred.band)} kg${res.pred.external ? ' (from the tap rate)' : ''} · decision ${res.how}${res.strict != null && res.strict !== res.value ? ' (read ' + fmtInt(res.strict) + ')' : ''}` : `history: ${res.how || 'off'}`,
+    res.candidates ? `most probable: ${res.candidates.map((x) => `${fmtInt(x.v)} ${probText(x.p)}`).join(' · ')}` : '',
     app.engine?.sess ? `noise σ ${Math.sqrt(app.engine.sess.R).toFixed(0)} kg · measurements ${app.engine.sess.meas.length}` : '',
   ];
   $('dbgText').textContent = lines.filter(Boolean).join('\n');

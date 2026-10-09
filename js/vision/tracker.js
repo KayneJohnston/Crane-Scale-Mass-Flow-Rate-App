@@ -14,10 +14,11 @@
 //     impossible for metal pouring in - or a drop of more than 5 t must persist
 //     for 3 s.
 //   * a frame the reader could not decide on its own (e.g. "7" vs "9", a faint
-//     segment) is accepted as the value inside the band that its digits fit
-//     almost as well as their best reading - the prior resolves the ambiguity.
-//     Not while a jump is pending, when the display may have changed, nor after
-//     20 s of such guesses without one clear reading.
+//     segment) is read as its most probable value, combining how well its digits
+//     fit each value with the prediction (posterior.js) - if that value is near the
+//     band and at least 95% probable (98% when no clear reading came in the last
+//     2 s). Not while a jump is pending, when the display may have changed, nor
+//     after 20 s of such guesses without one clear reading.
 //   * a clear reading that is the expected value with a digit lost or added
 //     (17000 read as 1700 or 7000 when a "0" or the "1" drowns in the glow) is
 //     refused however often it repeats - also for a minute after the readings
@@ -35,6 +36,7 @@
 // mismatching segment).
 
 import { median, robustSlope } from '../analysis/stats.js';
+import { valuePosterior, POSTERIOR_DEFAULTS } from './posterior.js';
 
 export const TRACK_DEFAULTS = {
   levelFrames: 7,          // readings in the median "current level"
@@ -49,12 +51,14 @@ export const TRACK_DEFAULTS = {
   minBandSteps: 3,
   maxBandSteps: 10,
   maxRateKgS: 50,          // physical limit used to widen the band after gaps
-  rescueMaxDelta: 1.2,     // an undecided frame is resolved if its digits fit this well
-  rescueMaxDigitCost: 2.0, // ... and no single digit fits worse than this
-  rescueMinMargin: 0.6,    // ... and clearly better than any other value it could be
-  rescueMaxBandSteps: 4,   // only when readings are steady (not during a bouncing touch)
+  rescueMinProb: 0.95,     // an undecided frame is read as its most probable value if that is this probable
+  rescueMinProbStale: 0.98, // ... or this, without a clear reading for freshSec (a touch may have gone unseen),
+  freshSec: 2,
+  rescueMaxDelta: 1.2,     // ... its digits fit nearly as well as their best reading,
+  rescueMaxDigitCost: 2.0, // ... no single digit fits worse than this,
+  rescueMaxBandSteps: 4,   // ... readings are steady (not during a bouncing touch)
   rescueMaxSec: 20,        // ... and a clear reading was accepted this recently
-  touchKg: 2000,           // how far a touch can pull the reading down unseen (see bestInBand)
+  ...POSTERIOR_DEFAULTS,   // the picture and dead-reckoning model (posterior.js)
 };
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -81,13 +85,19 @@ export function digitSlip(v, lo, hi, cfg) {
   return false;
 }
 
-/** May an unclear frame be read as nb (from bestInBand) with this prediction? */
-export function canRescue(nb, pred, cfg) {
-  if (!nb || !pred || !nb.inBand) return false;
+/**
+ * May an unclear frame be read as its most probable value (post, from valuePosterior)
+ * with this prediction? The value must be at least minProb probable, read from the
+ * frame's own glyphs (not a digit count they don't have) and near the band: a value
+ * further away is a change of the weight, which clear readings must confirm.
+ */
+export function canRescue(post, pred, cfg, minProb = cfg.rescueMinProb) {
+  if (!post || !pred || !post.sameLength) return false;
+  const step = cfg.stepKg || 50;
   // Only in a narrow band: the wider it is (a bouncing touch, a long spell without
   // readings), the likelier a misread digit lands on a value inside it.
-  return pred.band <= cfg.rescueMaxBandSteps * (cfg.stepKg || 50) && nb.excess <= cfg.rescueMaxDelta &&
-    nb.maxDigitCost <= cfg.rescueMaxDigitCost && nb.margin >= cfg.rescueMinMargin;
+  return pred.band <= cfg.rescueMaxBandSteps * step && Math.abs(post.v - pred.value) <= pred.band + step &&
+    post.p >= minProb && post.excess <= cfg.rescueMaxDelta && post.maxDigitCost <= cfg.rescueMaxDigitCost;
 }
 
 // prediction from the tap engine's expectation {lo, hi, level, high}
@@ -95,48 +105,6 @@ function fromExpectation(e, c) {
   if (!e || !(e.hi >= e.lo)) return null;
   const band = Math.max(c.minBandSteps * (c.stepKg || 50), (e.hi - e.lo) / 2);
   return { value: (e.lo + e.hi) / 2, band, level: e.level ?? (e.lo + e.hi) / 2, slope: 0, high: e.high ?? e.hi, external: true };
-}
-
-/**
- * Best reading of a frame near the prediction, given its per-digit costs.
- * Values are scored over a neighbourhood wider than the band, so a value just
- * outside the band that fits the digits better is noticed (the returned best is
- * then flagged !inBand and must not be used to rescue the frame). When the
- * prediction comes from the tap engine (no recent readings), a touch may have
- * pulled the reading down meanwhile: the neighbourhood then reaches touchKg
- * below the band, so a frame is not "corrected" up to the expected weight while
- * the crucible rests on the cell unseen.
- */
-export function bestInBand(lattice, pred, cfg) {
-  if (!lattice || !pred) return null;
-  const { costs, n } = lattice;
-  const mult = cfg.multiplier || 1, step = cfg.stepKg || 50;
-  let bestCost = 0;
-  for (const c of costs) bestCost += Math.min(...c);
-  const wide = pred.band + Math.max(500, 2 * pred.band);
-  let best = null, second = null;
-  const below = pred.external ? Math.max(wide, pred.band + (cfg.touchKg ?? 0)) : wide;
-  const lo = Math.ceil((pred.value - below) / step) * step;
-  for (let v = lo; v <= pred.value + wide; v += step) {
-    if (v < cfg.minKg || v > cfg.maxKg) continue;
-    const ds = String(Math.round(v / mult));
-    if (ds.length !== n) continue;
-    let cost = 0, mx = 0;
-    for (let i = 0; i < n; i++) {
-      const ci = costs[i][ds.charCodeAt(i) - 48];
-      cost += ci;
-      if (ci > mx) mx = ci;
-    }
-    const score = cost + (0.002 * Math.abs(v - pred.value)) / step; // ties -> nearest the prediction
-    const cand = { v, cost, score, maxDigitCost: mx, inBand: Math.abs(v - pred.value) <= pred.band };
-    if (!best || score < best.score) { second = best; best = cand; } else if (!second || score < second.score) second = cand;
-  }
-  if (best) {
-    best.excess = best.cost - bestCost;
-    // how much better than the next most plausible value (14600 vs 14800 must not be guessed)
-    best.margin = second ? second.cost - best.cost : Infinity;
-  }
-  return best;
 }
 
 export class DisplayTracker {
@@ -217,11 +185,12 @@ export class DisplayTracker {
     return digitSlip(v, L.v - c.touchKg, top + c.maxRateKgS * (t - L.t) + c.minBandSteps * step, c);
   }
 
-  /** Would an unclear frame be resolved as nb (from bestInBand) now? */
-  willRescue(t, nb, p, c) {
+  /** Would an unclear frame be resolved as post (from valuePosterior) now? */
+  willRescue(t, post, p, c) {
     if (this.pending && t - this.pending.tLast <= c.relockWindowSec) return false; // a jump is being checked
     // (a long run of guesses without one clear reading may have drifted off)
-    return t - this.lastClear <= c.rescueMaxSec && canRescue(nb, p, c);
+    const since = t - this.lastClear;
+    return since <= c.rescueMaxSec && canRescue(post, p, c, !p.external && since <= c.freshSec ? c.rescueMinProb : c.rescueMinProbStale);
   }
 
   /** Count a reading towards a pending jump (or the initial lock); re-lock when convincing. */
@@ -247,7 +216,8 @@ export class DisplayTracker {
   /**
    * Decide what this frame shows.
    * attempts: reader results for this frame ({ok, value, lattice}); pred: from predict().
-   * Returns {value|null, how, pred, near}.
+   * Returns {value|null, how, pred, near}; near: the frame's most probable value given
+   * the prediction (valuePosterior), with its probability and the runners-up.
    */
   decide(t, attempts, cfg = {}, pred = undefined) {
     const c = { ...TRACK_DEFAULTS, ...cfg };
@@ -262,17 +232,18 @@ export class DisplayTracker {
       if (strict == null) return { value: null, how: nothing, pred: null };
       return { ...this.confirm(t, strict, c, c.lockFrames, 0, 'lock'), pred: null };
     }
+    // the most probable value given each reading of the frame (each colour mode) and
+    // the prediction
+    let near = null, nearR = null;
+    for (const r of attempts) {
+      const post = valuePosterior(r.lattice, p, c);
+      if (post && (!near || post.p > near.p)) { near = post; nearR = r; }
+    }
     if (strict != null && Math.abs(strict - p.value) <= p.band) {
       this.pending = null;
       this.accept(t, strict, c);
       this.lastClear = t;
-      return { value: strict, how: 'ok', pred: p, from: strictR };
-    }
-    // the best in-band interpretation of this frame's digits
-    let near = null, nearR = null;
-    for (const r of attempts) {
-      const nb = bestInBand(r.lattice, p, c);
-      if (nb && (!near || nb.excess < near.excess)) { near = nb; nearR = r; }
+      return { value: strict, how: 'ok', pred: p, near, from: strictR };
     }
     if (strict != null) {
       // A clear reading away from the prediction: a genuine change only if it repeats.
