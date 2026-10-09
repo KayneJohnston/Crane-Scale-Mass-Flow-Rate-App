@@ -1,15 +1,17 @@
 // Stress test of the reading decisions (tracker.js) over simulated taps, without
 // rendering: each frame's reader output is drawn from a deliberately pessimistic model.
-//   node tools/tracker-sim.mjs [taps] [--offset n]
+//   node tools/tracker-sim.mjs [taps] [--offset n] [--correlated]
 //
 // Mostly clear frames, with some unclear ones (one digit doubtful) and rare misreads.
 // In "unclear spells" (8-30 s, every 40-90 s, like a glowing 8 the reader can't make
 // out) no frame reads clearly: an 8 or a 1 is doubtful - and often looks more like
 // a digit one segment away than like itself - and 8% of the frames are read with a
-// digit lost. Compares the reading history alone with the history helped by the tap
-// engine's expectation (TapEngine.expectation): share of frames given a value, and
-// wrong values. The model is harsher than the real reader, so the wrong values are
-// an upper bound on the risk, not an estimate of it.
+// digit lost. With --correlated, a doubtful digit is misjudged the same way on every
+// frame of a spell (as when the same glow fools them alike), not afresh each frame.
+// Compares the reading history alone with the history helped by the tap engine's
+// expectation (TapEngine.expectation): share of frames given a value, and wrong
+// values. The model is harsher than the real reader, so the wrong values are an
+// upper bound on the risk, not an estimate of it.
 import { TapSimulator } from '../js/analysis/sim.js';
 import { TapEngine } from '../js/analysis/engine.js';
 import { DisplayTracker, TRACK_DEFAULTS } from '../js/vision/tracker.js';
@@ -17,7 +19,7 @@ import { TEMPLATES } from '../js/vision/sevenseg.js';
 import { mulberry32 } from '../js/vision/render7seg.js';
 
 const arg = (k, d) => { const i = process.argv.indexOf(k); return i > 0 ? +process.argv[i + 1] : d; };
-const nTaps = +(process.argv[2] || 20), offset = arg('--offset', 0);
+const nTaps = +(process.argv[2] || 20), offset = arg('--offset', 0), correlated = process.argv.includes('--correlated');
 const CFG = { ...TRACK_DEFAULTS, minKg: 1000, maxKg: 40000, stepKg: 50, multiplier: 1 };
 const fps = 10;
 
@@ -29,15 +31,21 @@ for (let a = 0; a < 10; a++) NEAR[a] = [...Array(10).keys()].filter((b) => b !==
 const gauss = (r) => { let u = 0; while (u === 0) u = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); };
 
 // per-digit costs as the reader reports them (~0.3 for the shown digit, ~1 per segment
-// that differs); a doubtful digit fits worse, and a neighbour may fit better
-function lattice(r, text, doubtful) {
+// that differs); a doubtful digit fits worse, and a neighbour may fit better. fault:
+// (position, digit) -> the same misjudgement for every frame of a spell (--correlated)
+function lattice(r, text, doubtful, fault = null) {
   const costs = [...text].map((ch, i) => {
     const d = +ch, c = new Float64Array(10);
     for (let k = 0; k < 10; k++) c[k] = Math.max(0.05, 0.3 + ham(ch, String(k)) + 0.25 * gauss(r));
     if (doubtful.includes(i)) {
-      c[d] += 0.3 + 1.6 * r();
-      const e = NEAR[d][Math.floor(r() * NEAR[d].length)];
-      c[e] = Math.max(0.1, Math.min(c[e], c[d] + (r() - 0.6) * 1.2));
+      let f = fault?.get(`${i}:${d}`);
+      if (!f) {
+        f = { pen: 0.3 + 1.6 * r(), e: NEAR[d][Math.floor(r() * NEAR[d].length)], off: (r() - 0.6) * 1.2 };
+        fault?.set(`${i}:${d}`, f);
+      }
+      const jit = fault ? 0.15 * gauss(r) : 0;
+      c[d] += f.pen + jit;
+      c[f.e] = Math.max(0.1, Math.min(c[f.e], c[d] + f.off + jit));
     }
     return c;
   });
@@ -46,12 +54,12 @@ function lattice(r, text, doubtful) {
 const clear = (r, text) => ({ ok: true, value: +text, lattice: lattice(r, text, []) });
 const lost = (s) => { const i = s.search(/[10]/); return i >= 0 ? s.slice(0, i) + s.slice(i + 1) : null; };
 
-function readerOut(r, truth, unclear) {
+function readerOut(r, truth, unclear, fault) {
   const s = String(truth), u = r();
   if (unclear) {
     const pos = [...s].map((ch, i) => (ch === '8' || ch === '1' ? i : -1)).filter((i) => i >= 0);
     if (u < 0.08 && lost(s)) return clear(r, lost(s));
-    if (u < 0.75) return { ok: false, lattice: lattice(r, s, pos.length ? pos : [Math.floor(r() * s.length)]) };
+    if (u < 0.75) return { ok: false, lattice: lattice(r, s, pos.length ? pos : [Math.floor(r() * s.length)], fault) };
     return { ok: false, lattice: null };
   }
   if (u < 0.8) return clear(r, s);
@@ -84,11 +92,13 @@ for (let s = 1 + offset; s <= nTaps + offset; s++) {
   const spells = [];
   for (let t = sim.tapStart + 10 * r(); t < sim.duration; t += 40 + 50 * r()) spells.push([t, t + 8 + 22 * r()]);
   const trH = new DisplayTracker(), trE = new DisplayTracker();
+  const faults = [];
   const eng = new TapEngine({});
   for (let k = 0; k < sim.duration * fps; k++) {
     const t = k / fps, truth = sim.displayValue(t);
-    const unclear = spells.some(([a, b]) => t >= a && t < b);
-    const raw = readerOut(r, truth, unclear);
+    const si = spells.findIndex(([a, b]) => t >= a && t < b), unclear = si >= 0;
+    if (correlated && unclear && !faults[si]) faults[si] = new Map();
+    const raw = readerOut(r, truth, unclear, correlated && unclear ? faults[si] : null);
     const pH = trH.predict(t, CFG);
     const dH = trH.decide(t, [gate(raw, pH)], CFG, pH);
     const pE = trE.predict(t, CFG, eng.expectation(t));
@@ -105,7 +115,7 @@ for (let s = 1 + offset; s <= nTaps + offset; s++) {
   }
 }
 const pct = (a, b) => `${(100 * a / Math.max(1, b)).toFixed(1)}%`;
-console.log(`${nTaps} simulated taps, ${fps} frames/s`);
+console.log(`${nTaps} simulated taps, ${fps} frames/s${correlated ? ', misjudgements repeated through each unclear spell' : ''}`);
 for (const [key, T] of Object.entries(tot)) {
   console.log(`  ${key === 'history' ? 'reading history       ' : 'history + tap engine  '} value given ${pct(T.val, T.n)}, wrong ${T.wrong} (${(100 * T.wrong / T.n).toFixed(3)}%, ${T.big} off by more than 150 kg)` +
     ` | in unclear spells: value given ${pct(T.valU, T.nU)}, wrong ${T.wrongU}`);

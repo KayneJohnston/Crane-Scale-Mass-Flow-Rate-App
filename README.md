@@ -54,6 +54,7 @@ No App Store, no account, no server. It's a web page you add to the home screen.
 5. **⚠ Touch** flashes while readings are impossibly low (crucible resting on the cathode). Those readings are excluded from every calculation.
 6. **Details:** pot number(s), crucible ID, crew, operator, notes. These can be entered during the tap, or you're asked when it ends. Crew, crucible and operator are remembered.
 7. **History:** every tap with mass, duration, average rate (green/red), peak 60 s rate, % of time fast / on target / slow, and touch count. **Export CSV** gives a summary (one row per tap). Each recording can export its full 0.5 s data or every raw camera frame. **Backup / Import** moves everything as JSON between phones. When an update improves how readings are processed, saved recordings are re-run from their raw camera frames the next time History opens, so older taps are corrected too.
+8. **Review:** pictures of the display from the frames the app found hard: those it couldn't read, didn't believe, or read only as the most probable value ("≈"), plus a clear one now and then to compare. It keeps at most one of each kind every 3 s and 20 every 10 minutes, and the tab shows how many are waiting. For each one, tap the value the display showed, type it, or choose *Can't tell*. The tab keeps score of how often the app's own values were right. **Test reader** reads the labelled pictures again with the current version of the app. **Export** shares them all as a .zip of pictures plus a table; sending it is the best way to improve the reader for your display (section 4). Up to 200 pictures are kept on the phone (the oldest unlabelled ones go first). Turn it off under Settings → Camera & vision.
 
 **Several pots into one crucible** (typically 2–5, e.g. from 16 t to 26 t over three pots): the whole crucible is one recording, and each pot's tap is detected and reported separately (Tap 1, Tap 2, …). A pot change (about a minute to move the crane, then about a minute for the vacuum to build) is fine as long as metal flows again within about **2 min 40 s** of the last pot stopping. That holds even if the display is out of view while the crane moves. If your pot changes take longer, raise *Stop when weight has not risen for* in Settings; each extra minute there allows an extra minute of pot change. After the last pot, press **End tap** to finish straight away, or the recording ends by itself 3 minutes later.
 
@@ -129,7 +130,7 @@ A reading is accepted only if it lies in the plausible range and is a multiple o
 - No digit may have half-lit segments.
 - "Any bright digits" mode needs a clearer win.
 
-**The reader prefers "no reading" to a wrong reading.** It was tested on 4,600 synthetic frames: blur, glow, glare, ghost segments, tilt, 12–70 px digits, indicator LEDs, clutter, and over-exposed displays modelled on photos of the real scale. It reads about 93% of normal frames, 88% of deliberately hard ones and 93% of over-exposed ones, with **no wrong values**. With dashes between the digits it reads 92% (56% before they were handled), again with no wrong values. In 3,600 frames of simulated taps neither the single-frame reader nor the tracker gave a wrong value. On the real scale it reads 9 of 10 photos, both app screenshots at 21,800 ("-2-1800.") and 135 of the 150 frames of a 15 s, 1080p video (138 with the reading history); the rest are refused and none is misread. Crops of these photos, screenshots and video frames are part of the tests. The steps below would also catch an isolated misread: the reading history (next section), 0.5 s medians and the Kalman gate.
+**The reader prefers "no reading" to a wrong reading.** It was tested on 4,600 synthetic frames: blur, glow, glare, ghost segments, tilt, 12–70 px digits, indicator LEDs, clutter, and over-exposed displays modelled on photos of the real scale. It reads about 93% of normal frames, 88% of deliberately hard ones and 93% of over-exposed ones, with **no wrong values**. With dashes between the digits it reads 92% (56% before they were handled), again with no wrong values. In 3,600 frames of simulated taps neither the single-frame reader nor the tracker gave a wrong value. On the real scale it reads 9 of 10 photos, both app screenshots at 21,800 ("-2-1800.") and 135 of the 150 frames of a 15 s, 1080p video (144 with the reading history); the rest are refused and none is misread. Crops of these photos, screenshots and video frames are part of the tests. The steps below would also catch an isolated misread: the reading history (next section), 0.5 s medians and the Kalman gate.
 
 ### 3.2 Each reading is checked against the previous ones
 Frames arrive about 10 times a second and the weight changes slowly. So each new frame is judged against what the last readings predict: the median of the last 7 accepted readings plus the current trend. The band around that prediction is sized from the jitter seen in recent frames (±3 to ±10 display steps).
@@ -154,8 +155,11 @@ Frames arrive about 10 times a second and the weight changes slowly. So each new
   - a clear reading came through in the last 20 s (a long run of guesses could drift off).
 
   The debug panel lists the three most probable values of every frame. On 3,700 unclear readings with known values (each tried with the prediction 0–100 kg off), this resolves as many as the previous rule (55%) with fewer wrong (10 instead of 14).
+- **The frames before.** The display holds a value for seconds between updates. So an unclear frame within 2 s of a clear reading most likely still shows that value, unless the display has changed in the meantime. The app assumes it changes about every 3 s (0.3 times a second), or as often as the readings did lately if that is more often, and that 1% of clear readings are wrong. So 0.1 s after a clear 25,850, the dead reckoning gives 25,850 96%, and less the longer ago. This counts only if 25,850 is also the frame's own most probable value. A frame whose digits point elsewhere may show a new value, and is never pulled back to the old one. On the real video this read 9 more of the 150 frames (1 more in a second take of the same scene), all correct. In the simulated taps below it gave a value for 1.1–1.2% more of all frames, with 4–7 more wrong values in about 315,000 frames.
+
+  Combining *every* frame was tried first: a Bayes filter that multiplies together the pictures of successive frames, each weighted down. On the real video it did about as well (10 more frames, all correct). But in the simulated taps it doubled the wrong values (158 → 321, or 189 → 472 with the tap rate), almost all of them in the unclear spells (27 → 208). Frames of an unclear spell share their faults (the same glow fools them alike), so multiplying them compounds one mistake into certainty. So only clear readings are carried over to the next frames.
 - **When the readings stop**, the band must allow for the fastest metal could pour (3,000 kg/min), so after 2–3 s it is too wide to resolve anything, and after about 8 s the history is discarded. During a recording the tap-rate filter (section 3.4) knows better: the weight can't fall below the last accepted readings and rises at the measured rate, give or take its uncertainty and the noise. That range takes over from the history as the dead-reckoning part: unclear frames are still resolved with it, as above, and a clear reading inside it is taken at once. In simulated taps the display was inside this range 99.9% of the time, about ±125 kg wide. It allows for a display that holds its value for several seconds and then catches up. During a touch the range isn't used.
-- **How much this helps, and what it risks.** `tools/tracker-sim.mjs` runs the reading decisions over 60 simulated taps with a deliberately pessimistic reader: in spells of 8–30 s every 8 and 1 is doubtful, often looks more like a neighbouring digit than itself, and 8% of frames lose a digit. In those spells the tap rate's range lifts the frames given a value from 6% to 10%. Wrong values go from 0.050% to 0.060% of all frames, most of them off by one 50 or 100 kg step. Checks without the digit-slip guard got 0.8% of these frames wrong: after the history went stale they locked onto readings with a lost digit.
+- **How much this helps, and what it risks.** `tools/tracker-sim.mjs` runs the reading decisions over 60 simulated taps with a deliberately pessimistic reader: in spells of 8–30 s every 8 and 1 is doubtful, often looks more like a neighbouring digit than itself, and 8% of frames lose a digit. In those spells the tap rate's range lifts the frames given a value from 7% to 10%. Wrong values go from 0.052% to 0.061% of all frames, most of them off by one 50 or 100 kg step. With `--correlated` a doubtful digit is misjudged the same way through a whole spell; wrong values are then 0.065% and 0.076%. Checks without the digit-slip guard got 0.8% of these frames wrong: after the history went stale they locked onto readings with a lost digit.
 - Without a recording, after about 8 s without a reading (phone lowered) the app locks on afresh from 2 consistent frames.
 
 Each raw frame in the frames CSV records which of these happened. *Settings → Camera & vision* can switch the check off or change the 3 frames.
@@ -227,8 +231,9 @@ Its ±90% band held the true rate 95% of the time. Taps saved with an earlier ve
 
 The vision was developed on a realistic simulator, so real footage will improve it. Please send:
 
-1. **A short video** (10–60 s) of the display filmed from where you'd stand, with the iPhone Camera app at the zoom you'd use. Ideally include one with glare.
-2. A **screenshot with the debug panel on** (👁 button). It shows the crop, the threshold mask, digit height, slant and the reason a frame failed. **Save snapshot** exports a full-resolution frame.
+1. **The Review pictures** (*Review → Export*, a .zip). These are the frames your display makes hard, with the values you gave. They show exactly where the reader fails, become its test cases (`tools/crops-import.mjs`), and give its probabilities real data to be checked against. Labelled ones are worth the most, including *Can't tell*.
+2. **A short video** (10–60 s) of the display filmed from where you'd stand, with the iPhone Camera app at the zoom you'd use. Ideally include one with glare.
+3. A **screenshot with the debug panel on** (👁 button). It shows the crop, the threshold mask, digit height, slant and the reason a frame failed. **Save snapshot** exports a full-resolution frame.
 
 Settings that may matter:
 
@@ -257,6 +262,11 @@ Settings that may matter:
 
 **`tap-rate-summary-….csv`**: one row per tap across all recordings (date, pots, crucible, crew, start, end, mass, average, ±, verdict, peak 60 s, % fast/ok/slow, touches).
 
+**`tap-rate-review-….zip`** (Review → Export) holds three things:
+- `crops/0001_25800.png` …: the pictures, named after the value you gave (or `unlabelled`, `unreadable`).
+- `labels.csv`: one row per picture with your label and what the app made of the frame. That is the value given and how (`prior` = most probable value) with its probability, the most probable values, a clear reading it didn't believe, why it couldn't read it, the value expected, colour mode, source and time.
+- `crops.json`: all of that, plus the reader's fit of every glyph to each digit 0–9 and where in the frame the picture was taken.
+
 ---
 
 ## 6. Development
@@ -270,6 +280,7 @@ js/vision/sevenseg.js      seven-segment locator + reader (pure functions on RGB
 js/vision/pipeline.js      two-stage frame reader, sampler-agnostic
 js/vision/tracker.js       checks each reading against the previous ones (temporal prior)
 js/vision/posterior.js     probability of every value: the picture x dead reckoning
+js/crops.js, js/zip.js     hard frames kept for review (the Review tab), their export as a .zip
 js/analysis/engine.js      binning, robust Kalman, windows, flow on/off, auto start/stop
 js/analysis/kalman.js      local linear trend Kalman filter and two-pass smoother
 js/analysis/stats.js       robust slope (Theil–Sen screen + least squares) + SE, hinge change-points, robust noise
@@ -290,10 +301,12 @@ node tools/real-debug.mjs photo.jpg out/   # what the reader sees in a real phot
 node tools/sequence-eval.mjs 8 --hard # frame sequences: independent reading vs. with the tracker
 node tools/tracker-sim.mjs 20         # reading decisions on simulated taps, with/without the tap engine's expectation
 node tools/lattice-calib.mjs unclear out.jsonl 500 && node tools/lattice-calib.mjs fit out.jsonl   # how far digit costs are probabilities
+node tools/crops-import.mjs review.zip out/   # labelled Review pictures -> PNGs + truth.json, read again by the current reader
 node tools/engine-run.mjs 3           # one simulated tap through the engine
 node tools/filter-bench/run.mjs       # live-rate benchmark: 20 estimators vs the Kalman filter (~3 min)
 node tests/e2e/smoke.mjs out/         # headless Chromium: demo -> history
 node tests/e2e/camera.mjs out/        # fake camera stream -> live session
 node tests/e2e/video.mjs out/         # synthetic video file -> analysis (needs ffmpeg)
+node tests/e2e/review.mjs out/        # hard frames kept, labelled in Review, exported as .zip
 node tools/serve.mjs 8080             # serve locally (camera needs https or localhost)
 ```

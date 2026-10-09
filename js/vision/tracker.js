@@ -18,7 +18,10 @@
 //     fit each value with the prediction (posterior.js) - if that value is near the
 //     band and at least 95% probable (98% when no clear reading came in the last
 //     2 s). Not while a jump is pending, when the display may have changed, nor
-//     after 20 s of such guesses without one clear reading.
+//     after 20 s of such guesses without one clear reading. Within 2 s of a clear
+//     reading, the display most likely still shows that value (it holds a value for
+//     seconds): if that is also the frame's own best guess, it counts as much more
+//     probable - the less so, the longer ago and the more often the readings changed.
 //   * a clear reading that is the expected value with a digit lost or added
 //     (17000 read as 1700 or 7000 when a "0" or the "1" drowns in the glow) is
 //     refused however often it repeats - also for a minute after the readings
@@ -58,6 +61,9 @@ export const TRACK_DEFAULTS = {
   rescueMaxDigitCost: 2.0, // ... no single digit fits worse than this,
   rescueMaxBandSteps: 4,   // ... readings are steady (not during a bouncing touch)
   rescueMaxSec: 20,        // ... and a clear reading was accepted this recently
+  holdLast: true,          // within freshSec of a clear reading the display most likely still shows it,
+  minChangeRate: 0.3,      // ... unless it changed: at least this often (per s), or as often as the readings did,
+  clearMisread: 0.01,      // ... or the clear reading was wrong
   ...POSTERIOR_DEFAULTS,   // the picture and dead-reckoning model (posterior.js)
 };
 
@@ -110,7 +116,7 @@ function fromExpectation(e, c) {
 export class DisplayTracker {
   constructor() { this.reset(); }
 
-  reset() { this.hist = []; this.pending = null; this.last = null; this.peak = null; this.lastClear = -Infinity; }
+  reset() { this.hist = []; this.pending = null; this.last = null; this.peak = null; this.lastClear = -Infinity; this.lastClearV = null; }
 
   /**
    * Predicted display value at time t: {value, band, high}, null before lock-on or
@@ -163,6 +169,46 @@ export class DisplayTracker {
     while (this.hist.length && this.hist[0].t < t - c.historySec) this.hist.shift();
   }
 
+  // a clear reading was accepted
+  cleared(t, v) { this.lastClear = t; this.lastClearV = v; }
+
+  // How often the shown value changes (per s): from the accepted readings of the last
+  // historySec, but at least minChangeRate.
+  changeRate(c) {
+    const H = this.hist;
+    let n = 0;
+    for (let i = 1; i < H.length; i++) if (H[i].v !== H[i - 1].v) n++;
+    const span = H.length > 1 ? H[H.length - 1].t - H[0].t : 0;
+    return Math.max(c.minChangeRate, n / Math.max(1, span));
+  }
+
+  // {v, q}: the last clear reading, and the probability that the display has shown
+  // something else since
+  holdOf(t, c) {
+    if (!c.holdLast || this.lastClearV == null || t < this.lastClear || t - this.lastClear > c.freshSec) return null;
+    return { v: this.lastClearV, q: 1 - (1 - c.clearMisread) * Math.exp(-this.changeRate(c) * (t - this.lastClear)) };
+  }
+
+  /**
+   * The most probable value of an unclear frame given the prediction, and the attempt
+   * (colour mode) whose glyphs fit it best. If that is the last clear reading, the
+   * display most likely still shows it (holdOf): never the other way round - a frame
+   * whose own glyphs point elsewhere may show a new value.
+   */
+  mostProbable(t, attempts, p, c) {
+    const hold = this.holdOf(t, c);
+    let near = null, nearR = null;
+    const better = (a, b) => !b || a.p > b.p + 1e-9 || (a.p > b.p - 1e-9 && a.excess < b.excess);
+    for (const r of attempts) {
+      const one = valuePosterior(r.lattice, p, c);
+      const held = one && hold && one.v === hold.v ? valuePosterior(r.lattice, p, c, hold) : null;
+      for (const post of [one, held]) {
+        if (post && better(post, near)) { near = post; nearR = r; }
+      }
+    }
+    return { near, nearR };
+  }
+
   // the last accepted value, and the highest one of the last slipSec (the weight comes
   // back to it after a touch)
   remember(t, v, c) {
@@ -206,7 +252,7 @@ export class DisplayTracker {
     if (Q.n >= needFrames && Q.tLast - Q.t0 >= needSec) {
       this.hist = Q.vals.slice();
       this.remember(t, v, c);
-      this.lastClear = t;
+      this.cleared(t, v);
       this.pending = null;
       return { value: v, how: kind === 'lock' ? 'locked' : 'jump-accepted' };
     }
@@ -232,17 +278,11 @@ export class DisplayTracker {
       if (strict == null) return { value: null, how: nothing, pred: null };
       return { ...this.confirm(t, strict, c, c.lockFrames, 0, 'lock'), pred: null };
     }
-    // the most probable value given each reading of the frame (each colour mode) and
-    // the prediction
-    let near = null, nearR = null;
-    for (const r of attempts) {
-      const post = valuePosterior(r.lattice, p, c);
-      if (post && (!near || post.p > near.p)) { near = post; nearR = r; }
-    }
+    const { near, nearR } = this.mostProbable(t, attempts, p, c);
     if (strict != null && Math.abs(strict - p.value) <= p.band) {
       this.pending = null;
       this.accept(t, strict, c);
-      this.lastClear = t;
+      this.cleared(t, strict);
       return { value: strict, how: 'ok', pred: p, near, from: strictR };
     }
     if (strict != null) {

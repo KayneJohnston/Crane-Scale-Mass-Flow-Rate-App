@@ -298,3 +298,46 @@ test('no guess between 21700 and 21800 when an over-exposed 8 looks more like a 
   assert.equal(d.value, null);
 });
 
+
+// ------------------------------------------- the frames before: a held value --
+
+// 14800 on the display, its 8 faint: 14900 (9) and 14600 (6) fit almost as well
+const faint8 = () => lattice('14800', { 2: { 8: 1.0, 9: 1.2, 6: 1.25 } });
+// the display moved on to 14900, and its 9 looks a little like an 8
+const faint9 = () => lattice('14900', { 2: { 9: 1.0, 8: 1.2, 0: 1.3 } });
+
+test('right after a clear reading, an unclear frame that fits it best is read as it', () => {
+  const tr = locked(0, 14800);
+  const C = { ...TRACK_DEFAULTS, ...CFG };
+  const one = valuePosterior(faint8(), tr.predict(1.2, CFG), C);
+  assert.equal(one.v, 14800);
+  assert.ok(one.p < 0.9, `the frame alone: ${one.p}`);
+  const d = tr.decide(1.2, [unread(faint8())], CFG);
+  assert.equal(d.how, 'prior');
+  assert.equal(d.value, 14800);
+  assert.ok(d.near.held && d.near.p > 0.99, `${d.near.p}`);
+  // without carrying the clear reading over, the frame stays unread
+  const tr2 = locked(0, 14800);
+  assert.equal(tr2.decide(1.2, [unread(faint8())], { ...CFG, holdLast: false }).value, null);
+});
+
+test('a frame that points at a new value is not pulled back to the last clear reading', () => {
+  const tr = locked(0, 14800);
+  const d = tr.decide(1.2, [unread(faint9())], CFG);
+  assert.equal(d.value, null);
+  assert.equal(d.near.v, 14900);
+  assert.ok(!d.near.held);
+});
+
+test('the held value fades: less sure the longer ago, the more often the display changes, gone after freshSec', () => {
+  const C = { ...TRACK_DEFAULTS, ...CFG };
+  const tr = locked(0, 14800); // last clear reading at 1.1 s
+  const a = tr.holdOf(1.2, C), b = tr.holdOf(2.6, C);
+  assert.equal(a.v, 14800);
+  assert.ok(a.q < 0.05 && b.q > a.q && b.q < 0.5, `${a.q} ${b.q}`);
+  assert.equal(tr.holdOf(3.2, C), null);
+  // a display that changed every half second
+  const busy = new DisplayTracker();
+  for (let i = 0; i < 40; i++) busy.decide(i * 0.1, [clear(14800 + 50 * (Math.floor(i / 5) % 2))], CFG);
+  assert.ok(busy.holdOf(4.0, C).q > 2 * tr.holdOf(1.2, C).q);
+});

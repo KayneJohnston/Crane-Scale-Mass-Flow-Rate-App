@@ -11,8 +11,10 @@ import { Store } from './store.js';
 import { Beeper } from './audio.js';
 import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js';
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
+import { CropStore, CropPolicy, CROP_DEFAULTS, cropRect, cropRecord, choicesFor, reviewOrder, reviewStats, exportFiles, cropsToDrop } from './crops.js';
+import { makeZip } from './zip.js';
 
-export const VERSION = '0.3.9';
+export const VERSION = '0.4.0';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -25,6 +27,8 @@ const wake = new WakeLock();
 const reader = new BrowserReader();
 const video = $('video'), simCanvas = $('simCanvas'), overlay = $('overlay'), camBox = $('camBox');
 const camera = new Camera(video);
+const crops = new CropStore();
+const cropPolicy = new CropPolicy();
 
 const app = {
   source: null,               // null | 'camera' | 'video' | 'demo'
@@ -203,6 +207,7 @@ async function startCamera() {
     useElement(video);
     app.engine = makeEngine();
     reader.resetTracking();
+    cropPolicy.reset();
     $('camStart').hidden = true;
     wake.request();
     app.hwZoom = 1;
@@ -322,6 +327,7 @@ async function runVideo() {
   v.running = true; v.cancel = false;
   app.engine = makeEngine();
   reader.resetTracking();
+  cropPolicy.reset();
   updateControls();
   const dur = video.duration;
   const fps = powerProfile(settings).videoFps;
@@ -452,6 +458,7 @@ function processFrame(el, w, h, T, wall) {
   const expect = app.engine?.expectation(T);
   const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug, expect }, T);
   app.lastRes = res;
+  collectCrop(res, el, w, h, T, wall);
   if (res.located) app.foundAt = performance.now();
   app.engine.pushFrame(T, wall, res.ok ? res.value : null, res.conf, res.how);
   app.frames++;
@@ -512,6 +519,252 @@ function syncPower() {
   $('btnLowPower').classList.toggle('on', low);
   document.body.classList.toggle('low-power', low);
   if (!low) camBox.classList.remove('dim');
+}
+
+// ------------------------------------------------------- review crops --
+
+const review = { count: { total: 0, todo: 0 }, full: false, cur: null, edit: null, skipped: new Set(), urls: [], test: null };
+
+// Keep a crop of the display from a hard frame for the Review tab (crops.js): from the
+// camera or a video only, at most one of a kind every few seconds.
+function collectCrop(res, el, w, h, T, wall) {
+  if (!settings.collectCrops || (app.source !== 'camera' && app.source !== 'video') || review.full) return;
+  const kind = cropPolicy.consider(res, T);
+  if (!kind) return;
+  const rect = cropRect(res.located, w, h);
+  if (!rect) return;
+  const cv = document.createElement('canvas');
+  cv.width = rect.outW; cv.height = rect.outH;
+  const ctx = cv.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(el, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.outW, rect.outH);
+  const meta = cropRecord(res, kind, { t: T, wall, source: app.source, rect });
+  cv.toBlob(async (blob) => {
+    if (!blob) return;
+    try {
+      await crops.add(meta, await blobBytes(blob));
+      review.count.total++; review.count.todo++;
+      if (review.count.total > CROP_DEFAULTS.maxCrops) await trimCrops();
+      updateReviewBadge();
+    } catch (e) { console.warn('crop not kept', e); }
+  }, 'image/png');
+}
+
+const blobBytes = (b) => (b.arrayBuffer ? b.arrayBuffer() : new Response(b).arrayBuffer());
+
+// at most maxCrops: the oldest unlabelled go first, labelled ones are never dropped
+async function trimCrops() {
+  const all = await crops.list();
+  const drop = cropsToDrop(all, CROP_DEFAULTS.maxCrops);
+  await crops.delete(drop);
+  countCrops(all.filter((c) => !drop.includes(c.id)));
+}
+
+function countCrops(list) {
+  const todo = list.filter((c) => c.label == null).length;
+  review.count = { total: list.length, todo };
+  review.full = list.length >= CROP_DEFAULTS.maxCrops && todo === 0; // all labelled: export and delete some
+}
+
+function updateReviewBadge() {
+  const b = $('reviewBadge'), n = review.count.todo;
+  b.hidden = !n;
+  b.textContent = n > 99 ? '99+' : String(n);
+}
+
+function pngUrl(buf) {
+  const url = URL.createObjectURL(new Blob([buf], { type: 'image/png' }));
+  review.urls.push(url);
+  return url;
+}
+
+function freeUrls() {
+  for (const u of review.urls) URL.revokeObjectURL(u);
+  review.urls = [];
+}
+
+async function renderReview() {
+  const list = await crops.list();
+  countCrops(list);
+  updateReviewBadge();
+  freeUrls();
+  const queue = reviewOrder(list).filter((c) => !review.skipped.has(c.id));
+  const cur = (review.edit && list.find((c) => c.id === review.edit)) || queue[0] || null;
+  review.edit = null;
+  await showCrop(cur);
+  renderReviewStats(list);
+  await renderReviewGrid(list);
+  $('reviewStats').hidden = $('reviewFoot').hidden = !list.length;
+}
+
+function describeCrop(c) {
+  const lines = [];
+  if (c.kind === 'unsure') lines.push(`Given as ≈${fmtInt(c.value)} kg, ${probText(c.conf ?? 0)} probable`);
+  else if (c.kind === 'sample') lines.push(`Read clearly as ${fmtInt(c.value)} kg`);
+  else if (c.kind === 'refused') lines.push(`Read ${c.strict != null ? fmtInt(c.strict) + ' kg' : 'something'}, not believed (${c.how === 'digit-slip' ? 'a digit lost?' : 'far from the readings before'})`);
+  else lines.push('Couldn’t read it');
+  if (c.kind !== 'unsure' && c.kind !== 'sample' && c.candidates?.length) {
+    lines.push(`Most probable: ${c.candidates.map((x) => `${fmtInt(x.v)} (${probText(x.p)})`).join(', ')}`);
+  }
+  const d = new Date(c.wall);
+  lines.push(`${d.toLocaleDateString([], { day: 'numeric', month: 'short' })} ${d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })} · ${c.source === 'video' ? 'video' : 'camera'}`);
+  if (c.label != null) lines.push(`You said: ${c.label === 'unreadable' ? 'can’t tell' : fmtInt(c.label) + ' kg'}`);
+  return lines;
+}
+
+async function showCrop(c) {
+  review.cur = c;
+  $('reviewCard').hidden = !c;
+  const empty = $('reviewEmpty');
+  empty.hidden = !!c;
+  if (!c) {
+    empty.textContent = review.count.total ? 'All done: nothing left to label.'
+      : settings.collectCrops ? 'Nothing to review yet. Hard frames are kept while the camera or a video is being read.'
+        : 'Keeping hard frames is off (Settings › Camera & vision).';
+    return;
+  }
+  const buf = await crops.image(c.id);
+  $('reviewImg').src = buf ? pngUrl(buf) : '';
+  const meta = $('reviewMeta');
+  meta.replaceChildren();
+  describeCrop(c).forEach((t, i) => {
+    const el = document.createElement(i === 0 ? 'strong' : 'div');
+    el.textContent = t;
+    meta.appendChild(el);
+  });
+  const box = $('reviewChoices');
+  box.replaceChildren();
+  for (const v of choicesFor(c, +settings.stepKg || 50)) {
+    const b = document.createElement('button');
+    b.className = 'btn'; b.type = 'button'; b.textContent = fmtInt(v);
+    b.addEventListener('click', () => labelCrop(c, v));
+    box.appendChild(b);
+  }
+  $('reviewValue').value = typeof c.label === 'number' ? c.label : '';
+}
+
+async function labelCrop(c, label) {
+  c.label = label;
+  c.labelledAt = Date.now();
+  await crops.update(c);
+  review.skipped.delete(c.id);
+  await renderReview();
+}
+
+function renderReviewStats(list) {
+  const s = reviewStats(list);
+  const lines = [`${s.todo} to label · ${s.labelled} labelled${s.unreadable ? ` (${s.unreadable} can’t tell)` : ''}`];
+  if (s.guessed) lines.push(`Most probable value given: right ${s.guessedRight} of ${s.guessed} times`);
+  if (s.clear) lines.push(`Clear readings: right ${s.clearRight} of ${s.clear}`);
+  if (s.withTop) lines.push(`Not read or not believed: the most probable value was right ${s.topRight} of ${s.withTop} times`);
+  const T = review.test;
+  if (T) lines.push(`Reader test on ${T.n} labelled pictures: ${T.ok} read right, ${T.none} not read, ${T.wrong} misread`);
+  if (review.full) lines.push(`Storage full (${CROP_DEFAULTS.maxCrops} pictures, all labelled): export them, then delete them to keep collecting.`);
+  $('reviewStats').textContent = lines.join('\n');
+}
+
+async function renderReviewGrid(list) {
+  const done = list.filter((c) => c.label != null).slice(0, 30);
+  $('reviewDone').hidden = !done.length;
+  const grid = $('reviewGrid');
+  grid.replaceChildren();
+  for (const c of done) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.className = 'review-thumb' + (c.value != null && c.value !== c.label ? ' miss' : ''); // the app gave another value
+    const img = document.createElement('img');
+    img.alt = '';
+    const buf = await crops.image(c.id);
+    if (buf) img.src = pngUrl(buf);
+    const t = document.createElement('span');
+    t.textContent = c.label === 'unreadable' ? 'can’t tell' : fmtInt(c.label);
+    b.append(img, t);
+    b.addEventListener('click', () => { review.edit = c.id; renderReview(); $('view-review').scrollTop = 0; });
+    grid.appendChild(b);
+  }
+}
+
+// "20.05" (tonnes) -> 20050; "20050" -> 20050
+function parseKg(text) {
+  const t = String(text).trim().replace(',', '.');
+  if (!t) return null;
+  const x = +t;
+  if (!Number.isFinite(x) || x <= 0) return null;
+  return t.includes('.') ? Math.round(x * 1000) : Math.round(x);
+}
+
+async function submitReviewValue() {
+  const c = review.cur;
+  if (!c) return;
+  const v = parseKg($('reviewValue').value);
+  if (v == null) { toast('Type the value the display showed, in kg'); return; }
+  const step = +settings.stepKg || 0;
+  if (step && v % step && !confirm(`${fmtInt(v)} kg is not a multiple of ${step} kg. Save it anyway?`)) return;
+  $('reviewValue').blur();
+  await labelCrop(c, v);
+}
+
+async function exportCrops() {
+  const list = await crops.list();
+  if (!list.length) { toast('Nothing to export yet'); return; }
+  toast('Preparing the pictures…');
+  const images = new Map();
+  for (const c of list) {
+    const b = await crops.image(c.id);
+    if (b) images.set(c.id, new Uint8Array(b));
+  }
+  const about = { version: VERSION, display: { minKg: +settings.minKg, maxKg: +settings.maxKg, stepKg: +settings.stepKg, multiplier: +settings.multiplier } };
+  const zip = makeZip(exportFiles(list, images, about));
+  await shareOrDownload(`tap-rate-review-${datestamp()}.zip`, zip, 'application/zip');
+}
+
+function loadImage(buf) {
+  return new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(new Blob([buf], { type: 'image/png' }));
+    const img = new Image();
+    img.onload = () => resolve({ img, url });
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('picture damaged')); };
+    img.src = url;
+  });
+}
+
+// How the reader, as it is now, does on the labelled pictures (each on its own, no history).
+async function testReaderOnCrops() {
+  const list = (await crops.list()).filter((c) => typeof c.label === 'number');
+  if (!list.length) { toast('Label some pictures first'); return; }
+  toast(`Reading ${list.length} pictures…`);
+  const rd = new BrowserReader();
+  const cfg = { ...readerConfig(settings), temporal: false };
+  const T = { n: 0, ok: 0, none: 0, wrong: 0 };
+  for (const c of list) {
+    const buf = await crops.image(c.id);
+    if (!buf) continue;
+    try {
+      const { img, url } = await loadImage(buf);
+      rd.resetTracking();
+      const w = img.naturalWidth, h = img.naturalHeight;
+      const r = rd.read(img, w, h, { x: 0, y: 0, w, h }, cfg, null);
+      URL.revokeObjectURL(url);
+      T.n++;
+      if (!r.ok) T.none++; else if (r.value === c.label) T.ok++; else T.wrong++;
+    } catch (e) { console.warn(e); }
+    await new Promise((res) => setTimeout(res, 0));
+  }
+  review.test = T;
+  renderReviewStats(await crops.list());
+  toast(`${T.ok} of ${T.n} read right, ${T.none} not read, ${T.wrong} misread`, 5000);
+}
+
+async function clearCrops() {
+  const list = await crops.list();
+  if (!list.length) { toast('Nothing to delete'); return; }
+  if (!confirm(`Delete all ${list.length} pictures kept for review, labelled ones too? Export them first to keep them.`)) return;
+  await crops.delete(list.map((c) => c.id));
+  review.skipped.clear();
+  review.test = null;
+  await renderReview();
+  toast('Deleted');
 }
 
 // ------------------------------------------------------------ overlay --
@@ -1151,6 +1404,7 @@ function showView(name) {
   for (const v of document.querySelectorAll('.view')) v.classList.toggle('active', v.id === `view-${name}`);
   for (const b of document.querySelectorAll('.tab')) b.classList.toggle('active', b.dataset.view === name);
   if (name === 'history') renderHistory();
+  if (name === 'review') renderReview();
   if (name === 'live') requestAnimationFrame(() => { applyView(); renderLive(true); });
 }
 
@@ -1251,6 +1505,14 @@ function wire() {
       renderHistory();
     } catch (err) { toast(`Import failed: ${err.message}`); }
   });
+  // review
+  $('reviewForm').addEventListener('submit', (e) => { e.preventDefault(); submitReviewValue(); });
+  $('btnReviewUnreadable').addEventListener('click', () => review.cur && labelCrop(review.cur, 'unreadable'));
+  $('btnReviewSkip').addEventListener('click', () => { if (review.cur) { review.skipped.add(review.cur.id); renderReview(); } });
+  $('btnReviewDelete').addEventListener('click', async () => { if (review.cur) { await crops.delete(review.cur.id); renderReview(); } });
+  $('btnCropExport').addEventListener('click', () => exportCrops().catch((e) => toast(`Export failed: ${e.message}`)));
+  $('btnCropTest').addEventListener('click', () => testReaderOnCrops());
+  $('btnCropClear').addEventListener('click', () => clearCrops());
   // settings tools
   $('selCamera').addEventListener('change', (e) => { settings.deviceId = e.target.value; saveSettings(settings); restartCamera(); });
   $('fileVideo').addEventListener('change', (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) loadVideo(f); });
@@ -1293,6 +1555,7 @@ async function recoverInterrupted() {
 async function init() {
   await store.open();
   await recoverInterrupted();
+  crops.open().then(async () => { countCrops(await crops.list()); updateReviewBadge(); }).catch((e) => console.warn(e));
   wire();
   setupGestures();
   renderSettings();
@@ -1304,7 +1567,7 @@ async function init() {
   }
   const p = new URLSearchParams(location.search);
   if (p.has('demo')) startDemo(+p.get('demo') || 5, +p.get('seed') || 0);
-  window.__tapRate = { app, settings: () => settings, store }; // for debugging / automated tests
+  window.__tapRate = { app, settings: () => settings, store, crops }; // for debugging / automated tests
 }
 
 init();

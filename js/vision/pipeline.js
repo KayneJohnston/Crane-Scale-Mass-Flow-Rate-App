@@ -8,7 +8,6 @@
 
 import { locateDisplay, readDigits, validateReading, expectedDigits, decodeLattice, READ_DEFAULTS } from './sevenseg.js';
 import { DisplayTracker, TRACK_DEFAULTS } from './tracker.js';
-import { valuePosterior } from './posterior.js';
 
 export const PIPE_DEFAULTS = {
   searchW: 400,        // width of the downscaled search image
@@ -61,7 +60,7 @@ export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = nu
     const r = attempt(sample, srcW, srcH, view, c, track, mode);
     attempts.push(r);
     if (r.ok && (pred ? Math.abs(r.value - pred.value) <= pred.band : !tracker?.isSlip(t, r.value, null, c))) break;
-    if (pred && tracker.willRescue(t, valuePosterior(r.lattice, pred, c), pred, c)) break;
+    if (pred && tracker.willRescue(t, tracker.mostProbable(t, [r], pred, c).near, pred, c)) break;
   }
   const base = attempts.find((r) => r.ok) || attempts.find((r) => r.located) || attempts[0];
   let res = base;

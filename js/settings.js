@@ -22,6 +22,7 @@ export const DEFAULTS = {
   videoFps: 8,
   temporal: true,
   relockFrames: 3,
+  collectCrops: true,
   // automatic start / stop
   autoStart: true,
   autoStop: true,
@@ -84,6 +85,7 @@ export const SCHEMA = [
       { key: 'videoFps', label: 'Video analysis frames per second', type: 'number', min: 2, max: 30, step: 1 },
       { key: 'temporal', label: 'Check each reading against the previous ones', type: 'checkbox', help: 'A reading far from the last few (e.g. 20050 then 10050) is only believed once it repeats; unclear frames are resolved using the expected value.' },
       { key: 'relockFrames', label: 'Frames needed to believe a sudden jump', type: 'number', min: 1, max: 10, step: 1 },
+      { key: 'collectCrops', label: 'Keep hard-to-read frames for review', type: 'checkbox', help: 'Pictures of the display from frames the app could not read or had to guess (at most one every 3 s and 20 every 10 minutes, 200 in all) stay on this phone for you to label in Review, and to export.' },
     ],
   },
   {

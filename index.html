@@ -93,6 +93,41 @@
         <div id="historyList" class="history-list"></div>
       </section>
 
+      <!-- REVIEW -->
+      <section class="view" id="view-review">
+        <div class="view-head">
+          <h2>Review</h2>
+          <div class="row wrap">
+            <button class="btn small" id="btnCropTest">Test reader</button>
+            <button class="btn small" id="btnCropExport">Export</button>
+          </div>
+        </div>
+        <p class="help">Frames the app found hard to read are kept here: those it could not read, did not believe, or read only as the most probable value. Say what the display showed. Exported, the labelled pictures show how the reader does on your display, and help improve it.</p>
+        <div class="review-card" id="reviewCard" hidden>
+          <div class="review-img"><img id="reviewImg" alt="The scale display in a hard frame"></div>
+          <div class="review-meta" id="reviewMeta"></div>
+          <div class="review-choices" id="reviewChoices"></div>
+          <form class="review-form" id="reviewForm" autocomplete="off">
+            <input id="reviewValue" type="number" inputmode="numeric" min="0" step="1" placeholder="Value shown, kg" aria-label="Value shown on the display, kg">
+            <button class="btn primary" type="submit">Save</button>
+          </form>
+          <div class="row wrap">
+            <button class="btn small" id="btnReviewUnreadable">Can’t tell</button>
+            <button class="btn small" id="btnReviewSkip">Skip</button>
+            <button class="btn small danger" id="btnReviewDelete">Delete</button>
+          </div>
+        </div>
+        <div class="empty" id="reviewEmpty" hidden></div>
+        <div class="review-stats" id="reviewStats"></div>
+        <div id="reviewDone" hidden>
+          <h3>Labelled</h3>
+          <div class="review-grid" id="reviewGrid"></div>
+        </div>
+        <div class="row wrap review-foot" id="reviewFoot">
+          <button class="btn small danger" id="btnCropClear">Delete all…</button>
+        </div>
+      </section>
+
       <!-- SETTINGS -->
       <section class="view" id="view-settings">
         <div class="view-head"><h2>Settings</h2></div>
@@ -131,6 +166,7 @@
     <nav class="tabbar">
       <button class="tab active" data-view="live"><span>◉</span>Live</button>
       <button class="tab" data-view="history"><span>☰</span>History</button>
+      <button class="tab" data-view="review"><span>✎</span>Review<b class="tab-badge" id="reviewBadge" hidden></b></button>
       <button class="tab" data-view="settings"><span>⚙</span>Settings</button>
     </nav>
   </div>
