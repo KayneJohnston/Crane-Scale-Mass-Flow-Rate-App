@@ -1,7 +1,7 @@
 // Tap Rate — app controller (camera / video / demo -> reader -> engine -> UI).
 
 import { loadSettings, saveSettings, resetSettings, SCHEMA, engineConfig, readerConfig, parseWindows, powerProfile } from './settings.js';
-import { TapEngine } from './analysis/engine.js';
+import { TapEngine, ENGINE_VERSION, reprocessSession } from './analysis/engine.js';
 import { analyseSession, ANALYSIS_VERSION } from './analysis/offline.js';
 import { TapSimulator } from './analysis/sim.js';
 import { renderDisplay, mulberry32 } from './vision/render7seg.js';
@@ -12,7 +12,7 @@ import { Beeper } from './audio.js';
 import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js';
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
 
-export const VERSION = '0.3.6';
+export const VERSION = '0.3.7';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -902,17 +902,35 @@ let openSessionObj = null;
 function verdictText(v) { return v === 'fast' ? 'too fast' : v === 'slow' ? 'too slow' : v === 'ok' ? 'on target' : ''; }
 
 // Taps saved before the analysis last improved are analysed again (and saved).
+// Bring a saved recording up to date: re-run its raw frames if it was recorded by an
+// older engine, and re-analyse it if the analysis has changed. Returns true if changed.
 function freshen(s) {
-  if (!s?.meas || s.status === 'active' || s.analysis?.version === ANALYSIS_VERSION) return false;
-  s.analysis = analyseSession(s);
-  return true;
+  if (!s?.meas || s.status === 'active') return false;
+  let changed = false;
+  if (s.raw?.length && (s.engineVersion ?? 1) < ENGINE_VERSION) {
+    try {
+      const r = reprocessSession(s);
+      if (r) {
+        for (const k of ['meas', 'segments', 'events', 'touchCount', 'touchTime', 'noiseSigma', 'partialStart']) s[k] = r[k];
+        s.analysis = null;
+      }
+    } catch (e) { console.warn('re-processing failed', e); }
+    s.engineVersion = ENGINE_VERSION; // (also after a failure: keep the old results, don't retry)
+    changed = true;
+  }
+  if (s.analysis?.version !== ANALYSIS_VERSION) { s.analysis = analyseSession(s); changed = true; }
+  return changed;
 }
 
 async function renderHistory() {
   const box = $('historyList');
   let list = [];
   try { list = await store.all(); } catch (e) { console.warn(e); }
-  for (const s of list) if (freshen(s)) store.put(s).catch(() => {});
+  for (const s of list) {
+    if (!freshen(s)) continue;
+    store.put(s).catch(() => {});
+    await new Promise((r) => setTimeout(r, 0)); // keep the page responsive while catching up
+  }
   box.replaceChildren();
   if (!list.length) {
     const p = document.createElement('div'); p.className = 'empty';

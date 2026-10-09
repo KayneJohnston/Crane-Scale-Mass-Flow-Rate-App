@@ -65,6 +65,10 @@ export const ENGINE_DEFAULTS = {
 };
 
 export const FLAG_CODES = { pre: 0, ok: 1, slow: 2, low: 3, high: 4 };
+
+// Bump when the live processing changes in a way that affects saved results: older
+// recordings are then re-run from their raw camera frames (reprocessSession).
+export const ENGINE_VERSION = 2;
 export const STATUS_CODES = { noflow: 0, measuring: 1, ok: 2, fast: 3, slow: 4, stopping: 5 };
 
 function makeId(wallMs) {
@@ -522,6 +526,7 @@ export class TapEngine {
     return {
       id: S.id,
       version: 1,
+      engineVersion: ENGINE_VERSION,
       startedAt: new Date(S.wall0).toISOString(),
       wall0: S.wall0,
       endedAt: S.endT != null ? new Date(S.wall0 + S.endT * 1000).toISOString() : null,
@@ -599,4 +604,22 @@ export class TapEngine {
     };
     return snap;
   }
+}
+
+/**
+ * Re-run a saved recording's raw camera frames through the current engine, so its
+ * readings are judged by the current rules (e.g. after a fix). Same start, end and
+ * settings as the recording; returns the new session, or null without raw frames.
+ */
+export function reprocessSession(sess) {
+  const raw = sess?.raw;
+  if (!raw?.length) return null;
+  const eng = new TapEngine({ ...(sess.config || {}), autoStart: false, autoStop: false });
+  const push = (r) => eng.pushFrame(r[0], sess.wall0 + r[0] * 1000, r[1], r[2], r[3]);
+  push(raw[0]);
+  eng.startSession(0, sess.startReason === 'auto' ? 'auto' : 'manual');
+  for (let i = 1; i < raw.length; i++) push(raw[i]);
+  const out = eng.endSession(sess.endReason || 'manual', sess.duration ?? raw[raw.length - 1][0]);
+  if (out) Object.assign(out, { id: sess.id, startReason: sess.startReason });
+  return out;
 }

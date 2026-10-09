@@ -60,6 +60,9 @@ export function analyseSession(sess, opts = {}) {
   const n = t.length;
   const result = { version: ANALYSIS_VERSION, segments: [], totals: null, smooth: { t: [], rate: [], ci: [] }, coverage: null };
   const nMeas = (sess.meas || []).length;
+  // spells with no readings at all (display out of view), not readings the live filter rejected
+  const blind = [];
+  for (let i = 1; i < nMeas; i++) if (sess.meas[i].t - sess.meas[i - 1].t > o.mergeGapSec) blind.push([sess.meas[i - 1].t, sess.meas[i].t]);
   const dur = sess.duration || (nMeas ? sess.meas[nMeas - 1].t : 0);
   result.coverage = dur > 0 ? Math.min(1, (nMeas * (cfg.binSec ?? 0.5)) / dur) : null;
   if (n < 10) return finish(result, sess, hi, lo);
@@ -89,17 +92,16 @@ export function analyseSession(sess, opts = {}) {
     if (runs[j + 1][0] - runs[j][1] <= o.mergeGapSec) runs.splice(j, 2, [runs[j][0], runs[j + 1][1]]);
     else j++;
   }
-  // A gap in the readings (display out of view) inside a run splits it, unless the
-  // weight rose across the gap as if the flow had carried on: the crane may have
-  // moved to the next pot meanwhile.
+  // A spell with the display out of view inside a run splits it, unless the weight
+  // rose across it as if the flow had carried on: the crane may have moved to the next
+  // pot meanwhile.
   const split = [];
   for (const [rs, re] of runs) {
     let a = rs;
-    for (let k = lowerBound(t, rs); k < n - 1 && t[k + 1] <= re; k++) {
-      const g0 = t[k], g1 = t[k + 1];
-      if (g1 - g0 <= o.mergeGapSec) continue;
-      const before = median(z.slice(lowerBound(t, g0 - 5), k + 1));
-      const after = median(z.slice(k + 1, lowerBound(t, g1 + 5)));
+    for (const [g0, g1] of blind) {
+      if (g0 < rs || g1 > re) continue;
+      const before = median(z.slice(lowerBound(t, g0 - 5), lowerBound(t, g0 + 0.01)));
+      const after = median(z.slice(lowerBound(t, g1), lowerBound(t, g1 + 5)));
       const f = slope30(g0 - o.halfWin);
       if (after - before < 0.5 * Math.max(0, f ? f.slope : 0) * (g1 - g0)) { split.push([a, g0]); a = g1; }
     }
@@ -135,10 +137,14 @@ export function analyseSession(sess, opts = {}) {
     };
     let before = lvl(Math.max(prevEnd, onset - o.levelWin), onset - 0.5);
     // The display was out of view shortly before the tap (e.g. the crane moving to this
-    // pot): the level the crucible was left at before that gap. Only this tap can have
-    // added metal since, whether it started during the gap or after it.
-    for (let j = Math.min(n - 1, lowerBound(t, onset)); j > 0 && t[j] >= onset - o.levelWin; j--) {
-      if (t[j] - t[j - 1] > o.mergeGapSec) { before = lvl(Math.max(prevEnd, t[j - 1] - o.levelWin), t[j - 1] + 0.01) || { v: z[j - 1], n: 1 }; break; }
+    // pot): the level the crucible was left at before that. Only this tap can have added
+    // metal since, whether it started while the display was out of view or after.
+    for (let b = blind.length - 1; b >= 0; b--) {
+      const [g0, g1] = blind[b];
+      if (g0 > onset + 0.01 || g1 < onset - o.levelWin) continue;
+      const i = lowerBound(t, g0 + 0.01) - 1;
+      if (g0 >= prevEnd && i >= 0) before = lvl(Math.max(prevEnd, g0 - o.levelWin), g0 + 0.01) || { v: z[i], n: 1 };
+      break;
     }
     const after = lvl(end + 0.5, Math.min(nextStart, end + o.levelWin));
     const levelBefore = before ? before.v : hOn ? hOn.a : z[lowerBound(t, onset)];

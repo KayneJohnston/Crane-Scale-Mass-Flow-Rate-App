@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TapSimulator } from '../js/analysis/sim.js';
-import { TapEngine, FLAG_CODES } from '../js/analysis/engine.js';
+import { TapEngine, FLAG_CODES, ENGINE_VERSION, reprocessSession } from '../js/analysis/engine.js';
 import { analyseSession } from '../js/analysis/offline.js';
 import { runSim } from '../tools/engine-run.mjs';
 
@@ -125,6 +125,24 @@ test('a slow tap on a steady display that holds its value for seconds (as on the
   const slowStart = shown.filter((p) => p.truth < 350 && p.t > sim.tapStart + 45 && p.t < sim.tapEnd);
   const tooSlow = slowStart.filter((p) => p.status === 'slow').length / slowStart.length;
   assert.ok(slowStart.length > 100 && tooSlow > 0.6, `"too slow" shown ${(100 * tooSlow).toFixed(0)}% of the slow start`);
+});
+
+test('a saved recording is re-run from its raw frames by the current engine', () => {
+  const { ended } = runSim(3);
+  const s = ended[0];
+  const live = analyseSession(s);
+  // as if an older engine had wrongly rejected every reading after the first minutes
+  const old = { ...s, engineVersion: 1, meas: s.meas.map((r, i) => (i > 300 ? { ...r, f: FLAG_CODES.high } : r)) };
+  const damaged = analyseSession(old).segments.reduce((m, g) => m + g.massKg, 0);
+  assert.ok(damaged < live.segments[0].massKg - 500, `the damaged copy is wrong (${damaged} kg)`);
+  const r = reprocessSession(old);
+  assert.equal(r.engineVersion, ENGINE_VERSION);
+  assert.equal(r.id, s.id);
+  assert.ok(Math.abs(r.meas.length - s.meas.length) <= 3, `${r.meas.length} vs ${s.meas.length} readings`);
+  const a = analyseSession(r);
+  assert.equal(a.segments.length, 1);
+  assert.ok(Math.abs(a.segments[0].massKg - live.segments[0].massKg) <= 50, `mass ${a.segments[0].massKg} vs ${live.segments[0].massKg}`);
+  assert.ok(Math.abs(a.segments[0].avgKgMin - live.segments[0].avgKgMin) <= 15, `avg ${a.segments[0].avgKgMin} vs ${live.segments[0].avgKgMin}`);
 });
 
 test('robust to a camera that drops 30% of frames and misreads 3%', () => {
