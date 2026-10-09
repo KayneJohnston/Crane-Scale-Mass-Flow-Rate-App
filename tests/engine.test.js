@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { TapSimulator } from '../js/analysis/sim.js';
-import { TapEngine } from '../js/analysis/engine.js';
+import { TapEngine, FLAG_CODES } from '../js/analysis/engine.js';
 import { analyseSession } from '../js/analysis/offline.js';
 import { runSim } from '../tools/engine-run.mjs';
 
@@ -97,6 +97,34 @@ test('a standard crucible (three pots, 1.5-2.5 min pot changes, display lost whi
       assert.ok(Math.abs(g.avgKgMin - sim.avgRateOf(i)) / sim.avgRateOf(i) < 0.04, `${tag}, pot ${i + 1}: ${g.avgKgMin} vs ${sim.avgRateOf(i)} kg/min`);
     });
   }
+});
+
+test('a slow tap on a steady display that holds its value for seconds (as on the real scale)', () => {
+  // From a real recording: no flicker, each value held for up to ~15 s, and a tap that
+  // started at ~250 kg/min. The display then sits on one value for 10-15 s while metal
+  // flows. That once ended the flow, restarted the filter ~650 kg too low and rejected
+  // a third of the readings as spikes, splitting one tap into two with 60% of the mass.
+  const sim = new TapSimulator({ seed: 5, rate0: 250, rateEnd: 650, rateTau: 200, tapMass: 3000, noise: 0, swingAmp: 0, displayHold: [1, 12], touches: 0, misreadProb: 0, wander: 20 });
+  const ended = [], events = [], shown = [];
+  const eng = new TapEngine({}, { onSessionEnd: (s) => ended.push(s), onEvent: (e) => events.push(e) });
+  for (let t = 0; t < sim.duration + 5; t += 0.1) {
+    const f = sim.frame(t);
+    eng.pushFrame(t, W0 + t * 1000, f.value, f.conf);
+    if (eng.sess?.flowing && eng.sess.main?.status) shown.push({ t, status: eng.sess.main.status, truth: sim.trueRate(t) });
+  }
+  assert.equal(ended.length, 1);
+  assert.equal(events.filter((e) => e.type === 'flow-stop').length, 1, 'the flow stopped once, at the end');
+  const s = ended[0];
+  const rejected = s.meas.filter((r) => r.f === FLAG_CODES.high).length / s.meas.length;
+  assert.ok(rejected < 0.02, `${(100 * rejected).toFixed(0)}% of the readings rejected as too high`);
+  const a = analyseSession(s);
+  assert.equal(a.segments.length, 1);
+  assert.ok(Math.abs(a.segments[0].massKg - 3000) < 100, `mass ${a.segments[0].massKg}`);
+  assert.ok(Math.abs(a.segments[0].avgKgMin - sim.trueAvgRate) / sim.trueAvgRate < 0.05, `avg ${a.segments[0].avgKgMin} vs ${sim.trueAvgRate}`);
+  // the slow start raises "too slow", not "flow dropping"
+  const slowStart = shown.filter((p) => p.truth < 350 && p.t > sim.tapStart + 45 && p.t < sim.tapEnd);
+  const tooSlow = slowStart.filter((p) => p.status === 'slow').length / slowStart.length;
+  assert.ok(slowStart.length > 100 && tooSlow > 0.6, `"too slow" shown ${(100 * tooSlow).toFixed(0)}% of the slow start`);
 });
 
 test('robust to a camera that drops 30% of frames and misreads 3%', () => {

@@ -46,7 +46,7 @@ No App Store, no account, no server. It's a web page you add to the home screen.
    | **Green ↔ "On target"** | within ±10% |
    | **Striped** red or green | the point estimate says so, but the 90% interval still overlaps the band edge (*not yet certain*) |
    | Grey "Measuring…" | first ~12 s of a tap, while the estimate settles |
-   | Grey "Flow dropping…" | rate collapsing (the tap is ending); no alarm unless it stays low for 15 s |
+   | Grey "Flow dropping…" | rate collapsing (the tap is ending); no alarm unless it stays low for 20 s without falling to nearly zero (a slow tap then gets "Too slow") |
    | Grey "No flow" / "Display lost" | no metal going in / camera can't see the number |
 
    A beep sounds when it goes red. Falling tones mean slow down; rising tones mean speed up. It repeats every 20 s while red. Mute with 🔔.
@@ -163,10 +163,12 @@ The Kalman filter for this model is the textbook optimal real-time estimator. It
 ### 3.5 Touches, bounces and misreads: the physics does the work
 **Metal can't leave the crucible**, so a reading well below the mass already established is physically impossible. That means the crucible is resting on the cathode or cell. The established mass is the median of the last 10 s of accepted readings (after a gap in the readings, of the last few accepted ones). A reading more than 3.5 σ below it is flagged as **touch** and excluded until the operator lifts the crucible.
 
-Readings far above the prediction (spikes, bounces on lift-off, misreads) are excluded too, unless they persist, are self-consistent and are physically reachable. In that case the filter re-locks onto them. Moderate outliers are down-weighted (Huber). The filter re-initialises if it is clearly lagging a real change. After the display has been out of view for more than 15 s (the crane moving to the next pot, say), the filter doesn't assume the flow carried on unchanged: it widens its uncertainty and re-locks onto the first readings after the gap.
+Readings far above the prediction (spikes, bounces on lift-off, misreads) are excluded too, unless they persist, are self-consistent and are physically reachable. In that case the filter re-locks onto them. Moderate outliers are down-weighted (Huber). The filter re-initialises if it is clearly lagging a real change; whether a jump is physically reachable is judged from the last accepted reading, not from the filter (which may be what went wrong). After the display has been out of view for more than 15 s (the crane moving to the next pot, say), the filter doesn't assume the flow carried on unchanged: it widens its uncertainty and re-locks onto the first readings after the gap.
 
 ### 3.6 Window tiles (20/40/60/120 s)
-Each tile is the **Theil–Sen slope**: the median of the slopes between all pairs of accepted readings in the window. It is a standard robust regression that is unaffected by up to about 29% outliers. Its ± uses a MAD noise estimate, inflated for autocorrelation, because crane swing makes neighbouring readings correlated.
+Each tile is a **robust slope** over the accepted readings in the window. A Theil–Sen line (the median of the slopes between all pairs of readings, unaffected by up to about 29% outliers) first screens out wild readings; the slope is then a least-squares fit to the rest. Theil–Sen alone fails on a slow tap: the real display can show the same value for 10–15 s, so most pairs of readings share a value and have slope 0, and the median drops towards zero although metal is flowing. Least squares follows the staircase's average climb. The ± uses a MAD noise estimate, inflated for autocorrelation, because the display's steps and crane swing make neighbouring readings correlated.
+
+**Slow taps on a steady display.** The flow only counts as stopped when both the 20 s slope and the Kalman filter's rate are below 100 kg/min. If metal flows again right where a flow was taken to end, the filter restarts from the weight at that moment.
 
 The scale only moves in 50 kg steps, and at 600 kg/min that is one step every 5 s. So short windows are inherently imprecise. With typical noise (σ ≈ 40 kg) the 90% precision is roughly:
 
@@ -249,7 +251,7 @@ js/vision/pipeline.js      two-stage frame reader, sampler-agnostic
 js/vision/tracker.js       checks each reading against the previous ones (temporal prior)
 js/analysis/engine.js      binning, robust Kalman, windows, flow on/off, auto start/stop
 js/analysis/kalman.js      local linear trend Kalman filter and two-pass smoother
-js/analysis/stats.js       Theil–Sen + SE, hinge change-points, robust noise
+js/analysis/stats.js       robust slope (Theil–Sen screen + least squares) + SE, hinge change-points, robust noise
 js/analysis/offline.js     per-tap results after a recording
 js/analysis/sim.js         realistic tap simulator (noise, swing, touches, misreads)
 js/vision/render7seg.js    synthetic seven-segment renderer (tests, demo, icons)

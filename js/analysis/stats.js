@@ -64,10 +64,31 @@ export function robustSlope(t, z, i0 = 0, i1 = t.length, opts = {}) {
   }
   if (k < 3) return null;
   const sl = pairBuf.subarray(0, k).sort();
-  const slope = k % 2 ? sl[k >> 1] : (sl[(k >> 1) - 1] + sl[k >> 1]) / 2;
+  const ts = k % 2 ? sl[k >> 1] : (sl[(k >> 1) - 1] + sl[k >> 1]) / 2;
   let tm = 0;
   for (let i = i0; i < i1; i++) tm += t[i];
   tm /= i1 - i0;
+  // The Theil-Sen line screens out wild readings. The slope itself is then a least-
+  // squares fit to the rest: on a coarse display (50 kg steps 10-15 s apart in a slow
+  // tap) most pairs share a step and have slope 0, which drags the Theil-Sen median
+  // towards zero, while least squares follows the staircase's average climb.
+  const off0 = [];
+  for (let i = i0; i < i1; i++) off0.push(z[i] - ts * (t[i] - tm));
+  const c0 = median(off0);
+  const s0 = Math.max(sigmaFloor, 1.4826 * median(off0.map((x) => Math.abs(x - c0))));
+  const keep = Math.max(4 * s0, 6 * sigmaFloor);
+  let nk = 0, tk = 0, zk = 0;
+  for (let i = i0; i < i1; i++) if (Math.abs(off0[i - i0] - c0) <= keep) { nk++; tk += t[i]; zk += z[i]; }
+  let slope = ts;
+  if (nk >= 4) {
+    tk /= nk; zk /= nk;
+    let sxy = 0, sxx2 = 0;
+    for (let i = i0; i < i1; i++) {
+      if (Math.abs(off0[i - i0] - c0) > keep) continue;
+      sxy += (t[i] - tk) * (z[i] - zk); sxx2 += (t[i] - tk) ** 2;
+    }
+    if (sxx2 > 1e-9) slope = sxy / sxx2;
+  }
   const off = [];
   for (let i = i0; i < i1; i++) off.push(z[i] - slope * (t[i] - tm));
   const intercept = median(off); // level at tm

@@ -61,7 +61,7 @@ export const ENGINE_DEFAULTS = {
   warmupSec: 12,
   maxRelSd: 0.15,
   hystPct: 1,
-  stopGraceSec: 15,
+  stopGraceSec: 20,
 };
 
 export const FLAG_CODES = { pre: 0, ok: 1, slow: 2, low: 3, high: 4 };
@@ -328,8 +328,12 @@ export class TapEngine {
     const f = robustSlope(t, z, 0, t.length, { sigmaFloor: this.sigmaFloor });
     if (!f) return false;
     if (kind === 'high') {
-      const reach = this.qMax * (pts[0].t - S.floorT) + 4 * Math.sqrt(R + S.floorP) + c.stepKg;
-      if (pts[0].z - S.floorM > reach) return false;              // physically impossible jump
+      // reachable from the last reading the filter accepted (not from the filter itself,
+      // which may be what went wrong)
+      const A = S.acc, k = A.t.length - 1;
+      const refT = k >= 0 ? A.t[k] : S.floorT, refZ = k >= 0 ? A.z[k] : S.floorM;
+      const reach = this.qMax * Math.max(0, pts[0].t - refT) + 4 * Math.sqrt(R + S.floorP) + c.stepKg;
+      if (pts[0].z - refZ > reach) return false;                  // physically impossible jump
       if (f.sigma > 3 * Math.sqrt(R) + c.stepKg) return false;     // readings not self-consistent
     }
     const m = f.intercept + f.slope * (rec.t - f.tm);
@@ -379,7 +383,10 @@ export class TapEngine {
       S.onCount = on ? S.onCount + 1 : 0;
       if (S.onCount >= c.startHold) this.flowStart(null, null);
     } else if (f20) {
-      if (f20.slope * 60 < c.flowOffKgMin) { if (S.offSince == null) S.offSince = t; }
+      // Both the 20 s slope and the filter must say the flow has stopped: in a slow tap
+      // the display can sit on one value for 10-15 s while the metal keeps flowing.
+      const filterLow = !S.kfActive || S.kf.q * 60 < c.flowOffKgMin;
+      if (f20.slope * 60 < c.flowOffKgMin && filterLow) { if (S.offSince == null) S.offSince = t; }
       else S.offSince = null;
       if (S.offSince != null && t - S.offSince >= c.flowOffHoldSec) this.flowStop(t);
     }
@@ -418,8 +425,13 @@ export class TapEngine {
         onset = tt[0]; a = f.intercept + f.slope * (tt[0] - f.tm); b = f.slope; seB = f.se;
       }
     }
-    if (S.lastFlowEnd != null) onset = Math.max(onset, S.lastFlowEnd);
     b = Math.min(this.qMax, Math.max(0, b));
+    if (S.lastFlowEnd != null && onset < S.lastFlowEnd) {
+      // flow resumed where the last flow was taken to end: start from the level at
+      // that moment, not the level at the fit's earlier change point
+      a += b * (S.lastFlowEnd - onset);
+      onset = S.lastFlowEnd;
+    }
     S.flowing = true; S.offSince = null; S.onCount = 0; S.lowSince = null;
     S.segOnset = onset; S.levelBefore = a;
     S.segments.push({ onset: r1(onset), levelBefore: Math.round(a), end: null });
@@ -454,17 +466,20 @@ export class TapEngine {
     if (!S.flowing || !S.kfActive) { S.main = { status: 'noflow' }; rec.st = 0; return; }
     const q = S.kf.q * 60, sd = Math.sqrt(S.kf.Pqq) * 60, ci = 1.645 * sd;
     const tgt = c.targetKgMin, hi = tgt * (1 + c.tolPct / 100), lo = tgt * (1 - c.tolPct / 100), h = (tgt * c.hystPct) / 100;
-    // A rate far below the band (under half the low limit, i.e. outside the normal
-    // operating range) right after normal flow is usually the tap ending, not a slow
-    // tap: show "flow dropping" (no alarm) until it has persisted for stopGraceSec.
-    // ... or a rate below the band that has fallen > 15% within 10 s (flow decaying)
+    // A rate far below the band (under half the low limit), or below the band and
+    // fallen > 15% within 10 s, may be the tap ending: show "flow dropping" (no alarm)
+    // for stopGraceSec. If the flow carries on below the band, it is a slow tap: then
+    // "too slow" - unless the rate is near zero (a quarter of the low limit), which is
+    // the tap ending. The timer only restarts once the rate is back in the band, so a
+    // slow tap whose rate wobbles still gets its alarm.
     let q10 = q;
     for (let i = S.meas.length - 1; i >= 0 && S.meas[i].t >= rec.t - 10; i--) if (S.meas[i].q != null) q10 = Math.max(q10, S.meas[i].q * 60);
     const declining = q < lo && q < 0.85 * q10;
-    if (q < 0.5 * lo || declining) { if (S.lowSince == null) S.lowSince = rec.t; } else S.lowSince = null;
+    if (q < 0.5 * lo || declining) { if (S.lowSince == null) S.lowSince = rec.t; }
+    else if (q >= lo) S.lowSince = null;
     let status;
     if (rec.t - S.segOnset < c.warmupSec || sd > c.maxRelSd * tgt) status = 'measuring';
-    else if (S.lowSince != null && rec.t - S.lowSince < c.stopGraceSec) status = 'stopping';
+    else if (S.lowSince != null && (rec.t - S.lowSince < c.stopGraceSec || q < 0.25 * lo)) status = 'stopping';
     else {
       let st = S.mainState;
       if (st === 'ok') { if (q > hi + h) st = 'fast'; else if (q < lo - h) st = 'slow'; }

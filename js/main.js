@@ -12,7 +12,7 @@ import { Beeper } from './audio.js';
 import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js';
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
 
-export const VERSION = '0.3.5';
+export const VERSION = '0.3.6';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);

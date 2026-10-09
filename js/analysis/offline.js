@@ -16,7 +16,7 @@ import { robustSlope, hingeOnset, hingeStop, median, lowerBound } from './stats.
 import { smoothRate, rateVarToS } from './kalman.js';
 
 // bump when the analysis changes, so saved taps are analysed again
-export const ANALYSIS_VERSION = 3;
+export const ANALYSIS_VERSION = 4;
 
 export const OFFLINE_DEFAULTS = {
   onKgMin: 150,
@@ -64,10 +64,12 @@ export function analyseSession(sess, opts = {}) {
   result.coverage = dur > 0 ? Math.min(1, (nMeas * (cfg.binSec ?? 0.5)) / dur) : null;
   if (n < 10) return finish(result, sess, hi, lo);
 
-  // centred 30 s slopes (only within [a, b]): find the taps, and the rate between them
+  // centred 30 s slopes (only within [a, b]): find the taps, and the rate between them.
+  // Only from readings spanning at least half the window: a few seconds of readings at
+  // the edge of a gap (display out of view) give a slope that is mostly noise.
   const slope30 = (tc, a = -Infinity, b = Infinity) => {
     const i0 = lowerBound(t, Math.max(a, tc - o.halfWin)), i1 = lowerBound(t, Math.min(b, tc + o.halfWin));
-    return i1 - i0 >= 10 ? robustSlope(t, z, i0, i1, { sigmaFloor }) : null;
+    return i1 - i0 >= 10 && t[i1 - 1] - t[i0] >= o.halfWin ? robustSlope(t, z, i0, i1, { sigmaFloor }) : null;
   };
   const grid = [];
   for (let tc = t[0] + 2; tc <= t[n - 1] - 2; tc += 1) grid.push(tc);
@@ -87,9 +89,25 @@ export function analyseSession(sess, opts = {}) {
     if (runs[j + 1][0] - runs[j][1] <= o.mergeGapSec) runs.splice(j, 2, [runs[j][0], runs[j + 1][1]]);
     else j++;
   }
+  // A gap in the readings (display out of view) inside a run splits it, unless the
+  // weight rose across the gap as if the flow had carried on: the crane may have
+  // moved to the next pot meanwhile.
+  const split = [];
+  for (const [rs, re] of runs) {
+    let a = rs;
+    for (let k = lowerBound(t, rs); k < n - 1 && t[k + 1] <= re; k++) {
+      const g0 = t[k], g1 = t[k + 1];
+      if (g1 - g0 <= o.mergeGapSec) continue;
+      const before = median(z.slice(lowerBound(t, g0 - 5), k + 1));
+      const after = median(z.slice(k + 1, lowerBound(t, g1 + 5)));
+      const f = slope30(g0 - o.halfWin);
+      if (after - before < 0.5 * Math.max(0, f ? f.slope : 0) * (g1 - g0)) { split.push([a, g0]); a = g1; }
+    }
+    split.push([a, re]);
+  }
   // A lone blip is not a tap: e.g. a few noisy readings at the edge of a gap in the
   // data (display out of view while the crane moves to the next pot).
-  runs = runs.filter(([a, b]) => b - a >= o.minRunSec);
+  runs = split.filter(([a, b]) => b - a >= o.minRunSec);
   // fall back to the live segments if the smoothed curve found none
   if (!runs.length && sess.segments?.length) runs = sess.segments.map((s) => [s.onset, s.end ?? t[n - 1]]);
 
@@ -115,7 +133,13 @@ export function analyseSession(sess, opts = {}) {
       const i0 = lowerBound(t, from), i1 = lowerBound(t, to);
       return i1 - i0 >= 6 ? { v: median(z.slice(i0, i1)), n: i1 - i0 } : null;
     };
-    const before = lvl(Math.max(prevEnd, onset - o.levelWin), onset - 0.5);
+    let before = lvl(Math.max(prevEnd, onset - o.levelWin), onset - 0.5);
+    // The display was out of view shortly before the tap (e.g. the crane moving to this
+    // pot): the level the crucible was left at before that gap. Only this tap can have
+    // added metal since, whether it started during the gap or after it.
+    for (let j = Math.min(n - 1, lowerBound(t, onset)); j > 0 && t[j] >= onset - o.levelWin; j--) {
+      if (t[j] - t[j - 1] > o.mergeGapSec) { before = lvl(Math.max(prevEnd, t[j - 1] - o.levelWin), t[j - 1] + 0.01) || { v: z[j - 1], n: 1 }; break; }
+    }
     const after = lvl(end + 0.5, Math.min(nextStart, end + o.levelWin));
     const levelBefore = before ? before.v : hOn ? hOn.a : z[lowerBound(t, onset)];
     let levelAfter, openEnd = false;

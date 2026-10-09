@@ -24,6 +24,7 @@ export const SIM_DEFAULTS = {
   noise: 22,                // kg white noise per display update
   swingAmp: 30, swingPeriod: 4.3,
   displayHz: 4,
+  displayHold: null,        // e.g. [1, 12]: the display holds its value 1-12 s between updates (seen on a real scale)
   dropProb: 0.08,           // camera frame unreadable
   misreadProb: 0.004,       // camera frame misread (one leading digit wrong)
   stepKg: 50,
@@ -81,6 +82,12 @@ export class TapSimulator {
       }
     }
     this.swingPh = rnd() * 2 * Math.PI;
+    // a display that only updates now and then (keeps showing the old value meanwhile)
+    if (o.displayHold) {
+      const hr = mulberry32(o.seed * 53 + 11), [a, b] = o.displayHold;
+      this.updates = [];
+      for (let tu = 0; tu < this.duration + 30; tu += a + (b - a) * hr()) this.updates.push(tu);
+    }
   }
 
   idx(t) { return Math.max(0, Math.min(this.ms.length - 1, Math.round(t / this.o.dt))); }
@@ -111,6 +118,11 @@ export class TapSimulator {
   /** Value shown on the scale display at time t. */
   displayValue(t) {
     const o = this.o;
+    if (this.updates) { // the value shown since the display last updated
+      let lo = 0, hi = this.updates.length - 1;
+      while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (this.updates[mid] <= t) lo = mid; else hi = mid - 1; }
+      t = this.updates[lo];
+    }
     const k = Math.floor(t * o.displayHz);
     const td = k / o.displayHz;
     const r = mulberry32((o.seed * 7919) ^ (k * 2654435761));
