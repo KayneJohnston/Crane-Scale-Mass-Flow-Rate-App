@@ -34,10 +34,11 @@ const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
 /**
  * Read one frame.
  * `track` persists between frames (display position, reading history);
- * `t` is the frame time in seconds (enables the temporal consistency checks).
+ * `t` is the frame time in seconds (enables the temporal consistency checks);
+ * `cfg.expect` (optional, from TapEngine.expectation) is where the tap engine expects the weight.
  * Result: {ok, value, how, reason, located, quads, ...}; `how` is one of
- *   ok | prior | locked | jump-accepted   (value given)
- *   locking | jump-pending | unread                   (no value)
+ *   ok | prior | locked | jump-accepted                (value given)
+ *   locking | jump-pending | digit-slip | unread       (no value)
  */
 export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = null) {
   const c = { ...TRACK_DEFAULTS, ...PIPE_DEFAULTS, ...cfg };
@@ -46,7 +47,7 @@ export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = nu
   let modes = c.colorMode === 'auto' ? ['red', 'hot', 'bright'] : [c.colorMode];
   if (track.lastMode && modes.includes(track.lastMode)) modes = [track.lastMode, ...modes.filter((m) => m !== track.lastMode)];
   const tracker = c.temporal && t != null ? (track.tracker ||= new DisplayTracker()) : null;
-  const pred = tracker ? tracker.predict(t, c) : null;
+  const pred = tracker ? tracker.predict(t, c, c.expect) : null;
   // the digit count the display should show, from the recent readings
   if (pred && c.expectDigits == null) {
     const m = c.multiplier || 1;
@@ -58,9 +59,8 @@ export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = nu
   for (const mode of modes) {
     const r = attempt(sample, srcW, srcH, view, c, track, mode);
     attempts.push(r);
-    if (r.ok && (!pred || Math.abs(r.value - pred.value) <= pred.band)) break;
-    const nb = pred ? bestInBand(r.lattice, pred, c) : null;
-    if (nb && nb.inBand && pred.band <= c.rescueMaxBandSteps * c.stepKg && nb.excess <= c.rescueMaxDelta && nb.maxDigitCost <= c.rescueMaxDigitCost && nb.margin >= c.rescueMinMargin) break;
+    if (r.ok && (pred ? Math.abs(r.value - pred.value) <= pred.band : !tracker?.isSlip(t, r.value, null, c))) break;
+    if (pred && tracker.willRescue(t, bestInBand(r.lattice, pred, c), pred, c)) break;
   }
   const base = attempts.find((r) => r.ok) || attempts.find((r) => r.located) || attempts[0];
   let res = base;

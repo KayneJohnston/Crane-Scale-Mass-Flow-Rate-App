@@ -103,7 +103,11 @@ Each analysed frame (10 per second) goes through these steps:
 
 **Framing.** The crop's size and scale come from the red area found, which may or may not take in the glow or the window around the digits, so they change with how tightly the display is framed (and the thresholds come from the background the crop holds). A crop of over-exposed digits that gave no reading is read once more with more background around it and its digits at the usual height. A second chance is also a second chance to misread, so there even a reading at the usual threshold needs a second threshold to agree.
 
-Two more things the real display does:
+Three more things the real display does:
+- **Dashes between the digits.** At some values it lights bars at the middle height in front of the first digit and in the empty part of a "1" cell: 21,800 shows as "-2-1800.". A dash glued to the "1" made it look like a stray stroke or a "7" with a broken top bar, so every frame was refused ("Display lost — re-aim").
+  - A short bar centred at the middle height beside the digits is set aside like a decimal point, and cut off where it runs into a digit (also where it overlaps the corner of the next digit).
+  - No digit has strokes only at the middle height on its left, so this cannot hide part of a digit: a "4" has its upper-left stroke, a "3" its top and bottom bars, a "7" its top bar.
+  - The checks that a "1" stands alone in its cell let a bar at the middle height pass only if nothing is lit above or below it, out to the edge of the cell. A "4" whose fainter upper-left stroke dropped out at a high threshold still shows it at the usual one, and a "7" with a broken top bar has it at the top: both are still refused.
 - **A bright line under the digits.** The window's lower lip reflects the glow as a thin line touching every digit, which glues the whole number into one shape.
   - A row at the top or bottom edge of the digits holding an unbroken lit run longer than 1.5 digit heights must be such a line, because no digit has a bar that long.
   - Such rows are taken out before anything else, so the line can neither glue the digits together nor outweigh them when the reader finds the digit band.
@@ -118,25 +122,30 @@ A reading is accepted only if it lies in the plausible range and is a multiple o
   - Indicator LEDs and the decimal point are left out of the number only when they sit off the digit pitch. Every digit, "1" included, is right-aligned on that pitch.
   - A 4-digit reading such as 3,050 is accepted only if the cells on both sides of it are in view and empty, even of faint light. Numbers are right-aligned, so only the decimal point (low down) may sit to the right.
   - A digit clearly wider than a full digit cell is two digits glued together by glow. A "1" stuck to a "6" would turn 16,500 into 6,500, so the frame is refused.
+  - A reading with one digit fewer or more than the value the history expects (17,000 read as 1,700 or 7,000) is refused however often it repeats (section 3.2).
 - **Snapping to valid values.** The display can only show multiples of 50 kg, so the tens digit must be 0 or 5 and the last digit 0. When a digit is ambiguous on its own (a smudged "5" that could be a "3"), the reader takes the most likely *valid* number. It does this only if that number clearly beats every other valid number, and only to settle an ambiguity. If the last digit clearly looks like an 8, the picture can't be trusted (unlit segments showing through, say), so the frame is refused, not "corrected".
 - The digits must sit on an evenly spaced pitch.
 - A "1" must be a straight column with the rest of its cell empty. A "7" whose top bar is only partly visible is refused, not read as a "1".
 - No digit may have half-lit segments.
 - "Any bright digits" mode needs a clearer win.
 
-**The reader prefers "no reading" to a wrong reading.** It was tested on 4,600 synthetic frames: blur, glow, glare, ghost segments, tilt, 12–70 px digits, indicator LEDs, clutter, and over-exposed displays modelled on photos of the real scale. It reads about 93% of normal frames, 88% of deliberately hard ones and 93% of over-exposed ones, with **no wrong values**. In 3,600 frames of simulated taps neither the single-frame reader nor the tracker gave a wrong value. On the real scale it reads 9 of 10 photos and 135 of the 150 frames of a 15 s, 1080p video (138 with the reading history); the rest are refused and none is misread. Crops of these photos and video frames are part of the tests. The steps below would also catch an isolated misread: the reading history (next section), 0.5 s medians and the Kalman gate.
+**The reader prefers "no reading" to a wrong reading.** It was tested on 4,600 synthetic frames: blur, glow, glare, ghost segments, tilt, 12–70 px digits, indicator LEDs, clutter, and over-exposed displays modelled on photos of the real scale. It reads about 93% of normal frames, 88% of deliberately hard ones and 93% of over-exposed ones, with **no wrong values**. With dashes between the digits it reads 92% (56% before they were handled), again with no wrong values. In 3,600 frames of simulated taps neither the single-frame reader nor the tracker gave a wrong value. On the real scale it reads 9 of 10 photos, both app screenshots at 21,800 ("-2-1800.") and 135 of the 150 frames of a 15 s, 1080p video (138 with the reading history); the rest are refused and none is misread. Crops of these photos, screenshots and video frames are part of the tests. The steps below would also catch an isolated misread: the reading history (next section), 0.5 s medians and the Kalman gate.
 
 ### 3.2 Each reading is checked against the previous ones
 Frames arrive about 10 times a second and the weight changes slowly. So each new frame is judged against what the last readings predict: the median of the last 7 accepted readings plus the current trend. The band around that prediction is sized from the jitter seen in recent frames (±3 to ±10 display steps).
 
 - **Inside the band** → accepted.
-- **Clear but far away** (e.g. 20050, 20050, 20050, 20050, then **10050**) → not believed on one frame, and never rewritten either. It must repeat on **3 consecutive frames** first. That covers a real drop when the crucible touches the cell, or a return to a recently seen level. A jump *above* anything seen recently is physically impossible for metal pouring in, so it must persist for **3 s**. The badge shows "Checking 10,050…" meanwhile.
+- **Clear but far away** (e.g. 20050, 20050, 20050, 20050, then **19050**) → not believed on one frame, and never rewritten either. It must repeat on **3 consecutive frames** first. That covers a real drop when the crucible touches the cell, or a return to a recently seen level. A jump *above* anything seen recently is physically impossible for metal pouring in, and a drop of more than 5,000 kg is more likely a misread than a touch, so these must persist for **3 s**. The badge shows "Checking 19,050…" meanwhile.
+- **A digit lost or added** (17,000 read as 1,700 when a "0" drowns in the glow, or as 7,000 when the "1" does) → refused however often it repeats. The badge shows "Ignoring 1,700 — digit lost?". The last value is remembered for a minute after the readings stop, so such a reading can't take over when the history is started afresh either. A genuine change of the weight almost never lands exactly on the expected value with a digit missing.
 - **Unclear frames** are those the reader couldn't decide on its own: a "7" that might be a "9", or a faint segment. For these the reader reports how well the glyphs fit every digit 0–9. The frame is resolved, shown as "≈20,050 kg", only if all of these hold:
   - the best-fitting value in the wider neighbourhood lies **inside** the band;
   - it fits clearly better than the runner-up (14600 vs 14800 is not guessed);
-  - readings are steady;
-  - no jump is being checked.
-- After about 8 s without a reading (phone lowered), the history is discarded and the app locks on afresh from 2 consistent frames.
+  - readings are steady (the band is at most ±200 kg);
+  - no jump is being checked;
+  - a clear reading came through in the last 20 s (a long run of guesses could drift off).
+- **When the readings stop**, the band must allow for the fastest metal could pour (3,000 kg/min), so after 2–3 s it is too wide to resolve anything, and after about 8 s the history is discarded. During a recording the tap-rate filter (section 3.4) knows better: the weight can't fall below the last accepted readings and rises at the measured rate, give or take its uncertainty and the noise. That range takes over from the history: unclear frames are still resolved against it, as above, and a clear reading inside it is taken at once. In simulated taps the display was inside this range 99.9% of the time, about ±125 kg wide. It allows for a display that holds its value for several seconds and then catches up. During a touch the range isn't used, and since a touch could also have started while nothing was readable, the runner-up an unclear frame must beat then includes every value down to 2,000 kg lower: a frame isn't "corrected" up to the expected weight while the crucible rests on the cell unseen.
+- **How much this helps, and what it risks.** `tools/tracker-sim.mjs` runs the reading decisions over 60 simulated taps with a deliberately pessimistic reader: in spells of 8–30 s every 8 and 1 is doubtful, often looks more like a neighbouring digit than itself, and 8% of frames lose a digit. In those spells the tap rate's range lifts the frames given a value from 6% to 9.5%. Wrong values go from 0.050% to 0.058% of all frames, four in five of them off by 150 kg or less. With the previous version's checks, 0.8% of these frames got a wrong value: after the history went stale they locked onto readings with a lost digit.
+- Without a recording, after about 8 s without a reading (phone lowered) the app locks on afresh from 2 consistent frames.
 
 Each raw frame in the frames CSV records which of these happened. *Settings → Camera & vision* can switch the check off or change the 3 frames.
 
@@ -233,7 +242,7 @@ Settings that may matter:
 | `rate_20s_kg_min` … | window rates as shown on the tiles |
 | `level_10s_kg`, `status` | robust current level; indicator state shown |
 
-**`…_frames.csv`**: every analysed camera frame (time, value or blank, confidence, decision: `ok`, `prior`, `locked`, `jump-accepted`, `jump-pending`, `locking`, `unread`).
+**`…_frames.csv`**: every analysed camera frame (time, value or blank, confidence, decision: `ok`, `prior`, `locked`, `jump-accepted`, `jump-pending`, `locking`, `digit-slip`, `unread`).
 
 **`tap-rate-summary-….csv`**: one row per tap across all recordings (date, pots, crucible, crew, start, end, mass, average, ±, verdict, peak 60 s, % fast/ok/slow, touches).
 
@@ -256,7 +265,7 @@ js/analysis/offline.js     per-tap results after a recording
 js/analysis/sim.js         realistic tap simulator (noise, swing, touches, misreads)
 js/vision/render7seg.js    synthetic seven-segment renderer (tests, demo, icons)
 tests/                     node --test unit tests;  tests/e2e/ Playwright end-to-end
-tests/fixtures/real/       crops of photos and video frames of the real scale (with the values shown)
+tests/fixtures/real/       crops of photos, video frames and app screenshots of the real scale (with the values shown)
 tools/                     vision evaluation/debug, test video, icons, local server
 ```
 
@@ -264,8 +273,10 @@ tools/                     vision evaluation/debug, test video, icons, local ser
 npm test                              # unit tests (vision accuracy, statistics, engine on simulated taps)
 node tools/vision-eval.mjs 500 --hard # Monte-Carlo read-rate / wrong-read check (single frames)
 node tools/vision-eval.mjs 500 --hot  # ... on over-exposed displays (white cores in red glow, LEDs)
+node tools/vision-eval.mjs 500 --hot --dashes # ... with dashes between the digits ("-2-1800.")
 node tools/real-debug.mjs photo.jpg out/   # what the reader sees in a real photo (PNG, or JPEG via ffmpeg)
 node tools/sequence-eval.mjs 8 --hard # frame sequences: independent reading vs. with the tracker
+node tools/tracker-sim.mjs 20         # reading decisions on simulated taps, with/without the tap engine's expectation
 node tools/engine-run.mjs 3           # one simulated tap through the engine
 node tools/filter-bench/run.mjs       # live-rate benchmark: 20 estimators vs the Kalman filter (~3 min)
 node tests/e2e/smoke.mjs out/         # headless Chromium: demo -> history

@@ -120,6 +120,20 @@ test('over-exposed display (white cores in a red bloom, indicator LEDs): reads, 
   }
 });
 
+test('dashes at the middle height between the digits ("-2-1800." for 21800) are set aside', () => {
+  // as on the real display: a dash before the first digit and one in front of each later "1"
+  let ok = 0, wrong = 0;
+  const N = 30;
+  for (let s = 1; s <= N; s++) {
+    const sc = hotScene(900 + s, { dashes: true, value: [21800, 18150, 21100, 11950, 17000][s % 5] });
+    const r = readScene(sc);
+    if (r.ok && r.value === sc.value) ok++;
+    else if (r.ok) wrong++;
+  }
+  assert.equal(wrong, 0);
+  assert.ok(ok / N >= 0.75, `read rate ${ok}/${N}`);
+});
+
 test('a normally exposed red display is not read as an over-exposed one', () => {
   const { buf, W, H } = scene('17000', { glow: 0.45, gain: 1.2, lit: [255, 41, 24] });
   const r = readFrame(makeSampler(buf, W, H), W, H, { x: 0, y: 0, w: W, h: H }, { colorMode: 'hot' });

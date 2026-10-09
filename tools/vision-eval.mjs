@@ -52,6 +52,15 @@ export function hotScene(seed, opts = {}) {
     dp: text.length - 1,
     glare: rnd() < 0.4 ? [{ x: U(0, W), y: U(0, H * 0.3), r: U(40, 160), i: U(80, 200) }] : [],
   };
+  // dashes at the middle height, as on the real display at 21,800 ("-2-1800."): one in
+  // front of the first digit and one in the left of each "1" cell after the first
+  if (opts.dashes) {
+    const first = text.search(/\S/), cw = opts2.widthRatio;
+    opts2.dashes = [{ u0: first * pitch - U(0.45, 0.6), u1: first * pitch - U(0.1, 0.18) }];
+    for (let i = first + 1; i < text.length; i++) {
+      if (text[i] === '1') opts2.dashes.push({ u0: i * pitch - U(0.12, 0.2), u1: i * pitch + cw * U(0.35, 0.5) });
+    }
+  }
   return { W, H, value, opts: opts2 };
 }
 
@@ -84,7 +93,7 @@ function run() {
   const t0 = Date.now();
   const hot = process.argv.includes('--hot');
   for (let s = 1 + offset; s <= count + offset; s++) {
-    const { W, H, value, opts } = hot ? hotScene(s) : randomScene(s, process.argv.includes('--hard'));
+    const { W, H, value, opts } = hot ? hotScene(s, { dashes: process.argv.includes('--dashes') }) : randomScene(s, process.argv.includes('--hard'));
     const buf = new Uint8ClampedArray(W * H * 4);
     renderDisplay(buf, W, H, opts);
     const sample = makeSampler(buf, W, H);

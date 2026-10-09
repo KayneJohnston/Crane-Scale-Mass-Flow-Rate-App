@@ -481,6 +481,63 @@ export function readDigits(rgba, w, h, opts = {}) {
   const rowsN = Math.ceil(H) + 2;
   const half = Math.floor((rowsN - 2) / 2);
 
+  // A bar lit at the middle height beside the digits (a real display showed "-2-1800"
+  // for 21800) is not part of any digit: no digit has lit pixels left of its right-hand
+  // strokes only at middle height (a 3 has its top and bottom bars, a 4 its upper-left
+  // stroke, a 7 its top bar). Such "dashes" are set aside like decimal points, and left
+  // out where a "1" must stand alone in its cell.
+  const midLo = top + 0.36 * H, midHi = top + 0.64 * H;
+  const inMid = (vv) => vv >= midLo && vv <= midHi;
+  // Is the cell left of a "1" (columns c0..c1) dark? Dark but for a dash: nearly nothing
+  // lit above or below the middle height, and what is lit there spans a bar's width
+  // (the slanted stroke of a "7" that lost its top bar only crosses it).
+  const cellDark = (c0, c1) => {
+    let all = 0, out = 0, first = -1, last = -1, cols = 0;
+    for (let col = Math.max(0, c0); col <= Math.min(usize - 1, c1); col++) {
+      let mid = 0;
+      for (let j = colStart[col]; j < colStart[col + 1]; j++) { all++; if (inMid(v[order[j]])) mid++; else out++; }
+      if (mid) { if (first < 0) first = col; last = col; cols++; }
+    }
+    if (all * stride <= 0.04 * H * H) return true;
+    return out * stride <= 0.015 * H * H && last - first + 1 >= 0.12 * H && cols >= 0.8 * (last - first + 1);
+  };
+  const isDash = (e) => {
+    const eh = e.v1 - e.v0 + 1, ew = e.u1 - e.u0 + 1;
+    return eh <= 0.3 * H && inMid((e.v0 + e.v1) / 2) && ew >= 0.06 * H && ew <= 0.75 * H;
+  };
+  // A dash at the left (dir 1) or right (dir -1) end of columns c0..c1: how many columns
+  // are lit (almost) only at middle height, or only by a short stroke centred there
+  // (pure), and how far it reaches on as a separate short stroke at middle height past
+  // the first strokes of the digit next to it (total).
+  const endDash = (c0, c1, dir) => {
+    let pure = 0, total = 0, lo0 = 0, hi0 = 0;
+    for (let col = dir > 0 ? c0 : c1; col >= c0 && col <= c1; col += dir) {
+      const vs = [];
+      for (let j = colStart[col]; j < colStart[col + 1]; j++) vs.push(v[order[j]]);
+      vs.sort((a, b) => a - b);
+      const n = vs.length;
+      let mid = 0;
+      for (const vv of vs) if (inMid(vv)) mid++;
+      if (total === pure && (!n || mid >= 0.85 * n || (vs[n - 1] - vs[0] < 0.3 * H && inMid((vs[0] + vs[n - 1]) / 2)))) {
+        pure++; total++;
+        if (n) { lo0 = vs[0]; hi0 = vs[n - 1]; }
+        continue;
+      }
+      // past the pure part: a group of rows (split at gaps) that is short, at middle
+      // height and level with the dash so far
+      let found = false;
+      for (let a = 0, b = 1; b <= n; b++) {
+        if (b < n && vs[b] - vs[b - 1] <= 1.5) continue;
+        const lo = vs[a], hi = vs[b - 1];
+        if (hi - lo < 0.3 * H && inMid((lo + hi) / 2) && lo <= hi0 + 1 && hi >= lo0 - 1) { found = true; lo0 = lo; hi0 = hi; break; }
+        a = b;
+      }
+      if (!found || !pure) break;
+      total++;
+    }
+    return { pure, total };
+  };
+
   // Measure the glyph made of columns c0..c1 (bounding box, row coverage, segment fills).
   const measure = (c0, c1) => {
     const g = {
@@ -577,9 +634,7 @@ export function readDigits(rgba, w, h, opts = {}) {
       // right-aligned in its cell with the rest of the cell dark (half of a "0" cut
       // off by a bad split is a narrow stroke too, but its other half is right there)
       const c0 = Math.max(0, Math.round(g.umax + 1 - 0.85 * Wt - umin)), c1 = Math.round(g.umin - umin) - 2;
-      let lit = 0;
-      for (let col = c0; col <= c1; col++) lit += colHist[col];
-      g.alone = lit * stride <= 0.04 * H * H;
+      g.alone = cellDark(c0, c1);
       // ... and it is a straight column: a bar sticking out at its top-left is what is
       // left of a "7" whose top bar is only partly visible
       g.topBar = g.uMid - g.uTop > Math.max(2, 0.1 * H);
@@ -641,7 +696,7 @@ export function readDigits(rgba, w, h, opts = {}) {
     if (!g.cnt) return [{ k: 0, cost: 0, part: g }];
     // a dot at the bottom is a decimal point (cheap); one higher up may be a cut-off bar
     const dotCost = g.mass >= DOT ? 2 : (g.vmin + g.vmax) / 2 > top + 0.6 * H ? 0.3 : 1;
-    if (!g.isGlyph) return [{ k: 0, cost: dotCost, part: g }];
+    if (!g.isGlyph) return [{ k: 0, cost: isDash({ u0: g.umin, u1: g.umax, v0: g.vmin, v1: g.vmax }) ? 0.4 : dotCost, part: g }];
     classify(g);
     const out = [{ k: 1, cost: g.cost + (g.good ? 0 : 2), part: g }];
     // a glyph-sized piece of round blobs may be indicator LEDs: it can be left out, but
@@ -657,7 +712,14 @@ export function readDigits(rgba, w, h, opts = {}) {
     const g = measure(c0, c1);
     for (const lc of leafOpts(g)) if (!out.has(lc.k) || lc.cost < out.get(lc.k).cost) out.set(lc.k, { cost: lc.cost, parts: [lc.part] });
     const wid = c1 - c0 + 1;
-    if (wid > trigger && wid >= 6 && depth <= 3) {
+    // a dash glued onto a digit (a "-1" is only digit-sized) is cut off where it ends
+    const dashCuts = [];
+    if (wid >= 6) {
+      const L = endDash(c0, c1, 1), R = endDash(c0, c1, -1);
+      if (L.pure >= 2 && L.total >= 0.12 * H && L.pure < wid - 2) dashCuts.push(c0 + L.pure - 1);
+      if (R.pure >= 2 && R.total >= 0.12 * H && R.pure < wid - 2) dashCuts.push(c1 - R.pure + 1);
+    }
+    if ((wid > trigger || dashCuts.length) && wid >= 6 && depth <= 3) {
       const lo = c0 + Math.max(1, Math.floor(0.12 * wid)), hi = c1 - Math.max(1, Math.floor(0.12 * wid));
       const minima = [];
       for (let col = lo; col <= hi; col++) {
@@ -665,10 +727,10 @@ export function readDigits(rgba, w, h, opts = {}) {
         if (cv <= colHist[col - 1] && cv <= colHist[col + 1]) minima.push(col);
       }
       minima.sort((a, b) => colHist[a] - colHist[b]);
-      const cuts = [];
+      const cuts = [...dashCuts];
       for (const m of minima) {
         if (cuts.every((x) => Math.abs(x - m) > 2)) cuts.push(m);
-        if (cuts.length >= 4) break;
+        if (cuts.length >= 4 + dashCuts.length) break;
       }
       for (const cut of cuts) {
         const cutCost = (colHist[cut] / Math.max(1, (0.1 * H) / stride)) * 0.2;
@@ -763,7 +825,7 @@ export function readDigits(rgba, w, h, opts = {}) {
   const spanL = glyphs[0].umin, spanR = glyphs[glyphs.length - 1].umax;
   for (const e of res.extras) {
     const vc = (e.v0 + e.v1) / 2;
-    if (e.mass >= DOT && vc < top + 0.6 * H && e.u1 > spanL && e.u0 < spanR) return fail('fragment');
+    if (e.mass >= DOT && vc < top + 0.6 * H && e.u1 > spanL && e.u0 < spanR && !isDash(e)) return fail('fragment');
   }
 
   // A "1" with a bar-shaped stub butting onto its upper left is really a "7" whose
@@ -777,14 +839,17 @@ export function readDigits(rgba, w, h, opts = {}) {
     // "7" without its top bar is exactly a "1"
     if (lineAbove) return fail('partial-1');
     const cellL = g.umax + 1 - 0.95 * Wt;
+    // A bar at the middle height in the cell may be a dash ("-1") - or the middle bar
+    // of a "4" whose fainter upper-left stroke dropped out. With such a bar, anything
+    // lit above or below it, out to the cell's very edge, makes it a "4".
+    const dashed = res.extras.some((e) => isDash(e) && (e.u0 + e.u1) / 2 >= cellL && e.u1 < g.umin);
     for (const e of res.extras) {
       const uc = (e.u0 + e.u1) / 2, vc = (e.v0 + e.v1) / 2;
-      if (uc >= cellL && uc < g.umin && vc < top + 0.45 * H && e.mass >= 0.01 * H * H) return fail('1-not-alone');
+      if (uc >= cellL && uc < g.umin && vc < top + 0.45 * H && e.mass >= 0.01 * H * H && !isDash(e)) return fail('1-not-alone');
+      if (dashed && uc >= g.umax + 1 - 1.15 * Wt && uc < g.umin && (e.v0 < midLo || e.v1 > midHi) && e.mass >= 0.005 * H * H && !isDash(e)) return fail('1-not-alone');
     }
     const c0 = Math.max(0, Math.round(g.umax + 1 - 0.85 * Wt - umin)), c1 = Math.round(g.umin - umin) - 2;
-    let lit = 0;
-    for (let col = c0; col <= c1; col++) lit += colHist[col];
-    if (lit * stride > 0.04 * H * H) return fail('1-not-alone');
+    if (!cellDark(c0, c1)) return fail('1-not-alone');
     // Read at a higher threshold than usual (to see the cores through a heavy glow),
     // the dimmer strokes of a 4 or 7 can drop out and leave what looks like a "1":
     // the rest of its cell must be dark at the usual threshold too (clear of the
@@ -793,8 +858,10 @@ export function readDigits(rgba, w, h, opts = {}) {
       const Tref = adaptiveThreshold(sm, n, { ...o, relThr: o.refRelThr }).T;
       const vA = top + (lineAbove ? 0.12 * H : 0), vB = bottom - (lineBelow ? 0.12 * H : 0);
       let dim = 0;
+      // (beside a dash: out to the edge of the cell, where a "4" has its upper-left stroke)
       for (let vv = vA; vv <= vB; vv++) {
-        for (let uu = g.umax + 1 - 0.85 * Wt; uu <= g.umin - Math.max(2, 0.12 * H); uu++) {
+        if (dashed && inMid(vv)) continue;
+        for (let uu = g.umax + 1 - (dashed ? 1 : 0.85) * Wt; uu <= g.umin - Math.max(2, 0.12 * H); uu++) {
           const [x, y] = toOrig(uu, vv);
           const xi = Math.round(x), yi = Math.round(y);
           if (xi >= 0 && yi >= 0 && xi < w && yi < h && sm[yi * w + xi] > Tref) dim++;
@@ -804,7 +871,7 @@ export function readDigits(rgba, w, h, opts = {}) {
     }
     for (const e of res.extras) {
       const vc = (e.v0 + e.v1) / 2, ew = e.u1 - e.u0 + 1, eh = e.v1 - e.v0 + 1;
-      if (vc < top + 0.4 * H && e.u1 <= g.umin + 1 && e.u1 >= g.umin - 0.25 * Wt && ew >= 0.8 * eh) return fail('fragment-1');
+      if (vc < top + 0.4 * H && e.u1 <= g.umin + 1 && e.u1 >= g.umin - 0.25 * Wt && ew >= 0.8 * eh && !isDash(e)) return fail('fragment-1');
     }
   }
 
@@ -848,7 +915,7 @@ export function readDigits(rgba, w, h, opts = {}) {
     for (const e of !o.maxDigits || n < o.maxDigits ? res.extras : []) {
       if (e.mass < DOT) continue;
       const kL = (R0 - e.u1) / P, kR = (e.u1 - Rn) / P;
-      if (kL > 0.3 && kL < 1.45) return fail('stray-digit');
+      if (kL > 0.3 && kL < 1.45 && !isDash(e)) return fail('stray-digit');
       if (kR > 0.75 && kR < 1.45 && e.v1 - e.v0 + 1 >= 0.5 * H && e.cu >= 0.3) return fail('stray-digit');
     }
     // A shorter reading than the range allows (3050 where 13050 is possible) needs
@@ -864,7 +931,9 @@ export function readDigits(rgba, w, h, opts = {}) {
       // (next to a cut-off frame line, what is left of the line is not a digit)
       const vA = top + (lineAbove ? 0.12 * H : 0), vB = bottom - (lineBelow ? 0.12 * H : 0);
       let lit = 0;
-      for (let i = 0; i < k; i++) if (u[i] >= uL && u[i] <= uR && v[i] >= vA && v[i] <= vB && !lineRows[rowOf(i)]) lit++;
+      // (a missing "1" is two full-height strokes: a dash at the middle height is not one)
+      const dashL = res.extras.some((e) => isDash(e) && e.u1 >= uL && e.u0 <= uR);
+      for (let i = 0; i < k; i++) if (u[i] >= uL && u[i] <= uR && v[i] >= vA && v[i] <= vB && !(dashL && inMid(v[i])) && !lineRows[rowOf(i)]) lit++;
       if (lit * stride > 0.006 * H * H) return fail('stray-digit');
       // Nothing faint there either: glare can wash a digit out below the threshold.
       // An over-exposed digit that hot mode missed (its core not enclosed by glow)
@@ -875,9 +944,10 @@ export function readDigits(rgba, w, h, opts = {}) {
         const t2 = adaptiveThreshold(chk, n, o);
         chkT = t2.p50 + 0.3 * t2.contrast;
       }
-      const faint = (u0, u1, v0, v1) => {
+      const faint = (u0, u1, v0, v1, skipMid = false) => {
         let c = 0;
         for (let vv = v0; vv <= v1; vv++) {
+          if (skipMid && inMid(vv)) continue;
           for (let uu = u0; uu <= u1; uu++) {
             const [x, y] = toOrig(uu, vv);
             const xi = Math.round(x), yi = Math.round(y);
@@ -886,7 +956,7 @@ export function readDigits(rgba, w, h, opts = {}) {
         }
         return c;
       };
-      if (faint(uL, uR, vA, vB) > 0.02 * H * H) return fail('stray-digit');
+      if (faint(uL, uR, vA, vB, dashL) > 0.02 * H * H) return fail('stray-digit');
       // every digit lights the upper part of the right of its cell (b, or the a bar)
       if (faint(Rn + P - 0.6 * Wd, uRR, vA, top + 0.5 * H) > 0.01 * H * H) return fail('stray-digit');
     }
@@ -925,6 +995,17 @@ export function readDigits(rgba, w, h, opts = {}) {
   for (const g of glyphs) {
     if (!g.good) return fail(g.narrow ? 'partial-1' : 'unknown-glyph');
     text += g.ch; minConf = Math.min(minConf, g.conf);
+  }
+  // Digits read without their top bar (a 0, 2 or 7 missing its "a") mean the top of
+  // the row was cut off - and a 7 without its top bar is exactly a 1. The picture
+  // cannot tell them apart then (the lattice says so): the readings around decide.
+  if (text.includes('1')) {
+    let noTop = 0;
+    for (const g of glyphs) if (!g.narrow && g.nv && '0235789'.includes(g.ch) && g.nv[0] < 0.35) noTop++;
+    if (noTop >= 2) {
+      for (const g of glyphs) if (g.narrow) g.costs[7] = Math.min(g.costs[7], g.costs[1]);
+      return fail('partial-1');
+    }
   }
   res.text = text;
   res.conf = minConf;

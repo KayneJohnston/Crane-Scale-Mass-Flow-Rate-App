@@ -561,6 +561,36 @@ export class TapEngine {
 
   // ------------------------------------------------------------- output --
 
+  /**
+   * Where the display reading should be now (kg), for the reader's consistency checks:
+   * {lo, hi, level, high}. The mass established by the last accepted readings (level)
+   * cannot fall, and since then it can have risen by the tap rate plus three standard
+   * deviations of it (wider after a blind spell, see kfProcess), give or take the noise;
+   * high is the most it could have risen at all. null without a rate estimate, during a
+   * touch (the reading follows the scale down), or after lostSec without accepted
+   * readings.
+   */
+  expectation(T) {
+    const S = this.sess, c = this.cfg;
+    if (!S || !S.kfActive || S.touch) return null;
+    const A = S.acc, n = A.t.length;
+    if (!n) return null;
+    const gap = T - S.T0 - A.t[n - 1];
+    if (!(gap >= 0) || gap > c.lostSec) return null;
+    // the level: the median of the last readings, or the last one when it has just moved
+    const med = median(A.z.slice(Math.max(0, n - 5))), last = A.z[n - 1];
+    const lo = Math.min(med, last), base = Math.max(med, last);
+    // A display can hold its value for many seconds while metal pours, then catch up:
+    // the rise counts from when the value it shows now first appeared (up to 30 s back).
+    let k = n - 1;
+    while (k > 0 && Math.abs(A.z[k - 1] - last) <= c.stepKg / 2 && A.t[n - 1] - A.t[k - 1] <= 30) k--;
+    const dt = T - S.T0 - A.t[k];
+    const q = Math.max(0, S.kf.q);
+    const varQ = Math.max(0, S.kf.Pqq) + (gap > c.blindSec ? (q / 2) ** 2 : 0);
+    const noise = Math.max(2 * c.stepKg, 3 * Math.sqrt(S.R));
+    return { lo: lo - noise, hi: base + (q + 3 * Math.sqrt(varQ)) * dt + noise, level: last, high: base + this.qMax * dt + noise };
+  }
+
   snapshot(T = this.lastT) {
     const c = this.cfg, S = this.sess;
     const since = T - this.lastValueT;

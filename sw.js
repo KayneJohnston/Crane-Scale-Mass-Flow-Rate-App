@@ -2,7 +2,7 @@
 // Network-first (so updates arrive straight away when there is signal), with
 // the cached copy used when offline or when the network is slow.
 
-const CACHE = 'tap-rate-v0.3.7';
+const CACHE = 'tap-rate-v0.3.8';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/main.js', 'js/settings.js', 'js/store.js', 'js/export.js', 'js/audio.js', 'js/camera.js', 'js/reader.js',

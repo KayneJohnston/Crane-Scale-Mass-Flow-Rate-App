@@ -127,6 +127,34 @@ test('a slow tap on a steady display that holds its value for seconds (as on the
   assert.ok(slowStart.length > 100 && tooSlow > 0.6, `"too slow" shown ${(100 * tooSlow).toFixed(0)}% of the slow start`);
 });
 
+test('the engine tells the reader where to expect the weight', () => {
+  // around the established weight, widening with the time since the value last moved
+  // (a display that holds for seconds, a blind spell); never during a touch
+  for (const opts of [{}, { displayHold: [1, 12], noise: 0, swingAmp: 0 }]) {
+    let n = 0, inside = 0, halfW = 0, inTouch = 0;
+    for (const seed of [1, 2, 3]) {
+      const sim = new TapSimulator({ seed, ...opts });
+      const eng = new TapEngine({});
+      for (let t = 0; t < sim.duration; t += 0.1) {
+        const blind = t > sim.tapStart + 60 && t < sim.tapStart + 72;
+        eng.pushFrame(t, W0 + t * 1000, blind ? null : sim.frame(t).value);
+        const e = eng.expectation(t + 0.1);
+        if (e && eng.sess.touch) inTouch++;
+        if (!e || sim.inTouch(t) || sim.inTouch(t + 1)) continue;
+        const v = sim.displayValue(t + 0.1);
+        n++; halfW += (e.hi - e.lo) / 2;
+        if (v >= e.lo && v <= e.hi) inside++;
+        assert.ok(e.high >= e.hi);
+      }
+      assert.equal(eng.expectation(sim.duration + eng.cfg.lostSec + 10), null);
+    }
+    assert.equal(inTouch, 0);
+    assert.ok(n > 5000, `${n}`);
+    assert.ok(inside / n > 0.995, `display inside the expected range ${(100 * inside / n).toFixed(2)}%`);
+    assert.ok(halfW / n < 160, `mean half-width ${(halfW / n).toFixed(0)} kg`);
+  }
+});
+
 test('a saved recording is re-run from its raw frames by the current engine', () => {
   const { ended } = runSim(3);
   const s = ended[0];

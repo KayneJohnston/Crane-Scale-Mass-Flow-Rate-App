@@ -8,8 +8,10 @@ import { readFrame } from '../js/vision/pipeline.js';
 // Crops of photos and of video frames of the real crane scale, taken from the floor:
 // over-exposed digits (white cores in a red glow), indicator LEDs left of the digits,
 // a bright line along the window's frame, glare on the glass. The video frames come
-// from a 1080p clip with the digits only ~33 px tall. [file, value shown, must read]:
-// a fixture that need not read may be refused, but is never read as a wrong value.
+// from a 1080p clip with the digits only ~33 px tall; the screen crops from the app's
+// own camera view at 12.6x zoom, with the display showing dashes at 21,800 ("-2-1800.",
+// the app's overlay painted out). [file, value shown, must read]: a fixture that
+// need not read may be refused, but is never read as a wrong value.
 const CASES = [
   ['photo-3050-a.png', 3050, true],
   ['photo-3050-b.png', 3050, true],
@@ -26,6 +28,8 @@ const CASES = [
   ['video-25850.png', 25850, true],
   ['video-25900.png', 25900, true],
   ['video-25950.png', 25950, true],
+  ['screen-21800-a.png', 21800, true],
+  ['screen-21800-b.png', 21800, true],
 ];
 
 function read(file) {

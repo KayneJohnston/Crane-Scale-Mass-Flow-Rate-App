@@ -37,6 +37,7 @@ export const RENDER_DEFAULTS = {
   clutter: [],         // [{x, y, r, color:[r,g,b]}] solid discs elsewhere in the scene
   dp: -1,              // index of the digit followed by a decimal point (-1 = none)
   leds: [],            // [{u, v, r}] lit indicator dots, in digit heights from the top-left of the first cell
+  dashes: [],          // [{u0, u1}] lit bars at the middle-segment height (a real display showed "-2-1800"), in digit heights from the left of the first cell
   hlines: [],          // [{v, t}] lit horizontal lines across the digit row (a window lip reflecting
                        // the glow), top at v and t thick, in digit heights from the top of the digits
   seed: 1,
@@ -193,6 +194,10 @@ export function renderDisplay(buf, W, H, opts = {}) {
       pts.push(toImg((d.u + d.r * Math.cos(a)) * Hd, (d.v + d.r * Math.sin(a)) * Hd));
     }
     fillConvex(lit, W, H, pts);
+  }
+  for (const d of o.dashes) {
+    const v0 = Hd / 2 - t / 2, v1 = Hd / 2 + t / 2;
+    fillConvex(lit, W, H, [[d.u0 * Hd, v0], [d.u1 * Hd, v0], [d.u1 * Hd, v1], [d.u0 * Hd, v1]].map(([a, b]) => toImg(a, b)));
   }
   for (const ln of o.hlines) {
     const u0 = -0.3 * Hd, u1 = (n - 1) * pitch + Wd + 0.3 * Hd, v0 = ln.v * Hd, v1 = (ln.v + ln.t) * Hd;

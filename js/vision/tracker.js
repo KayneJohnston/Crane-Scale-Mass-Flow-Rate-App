@@ -11,11 +11,23 @@
 //     frame (and never rewritten either): it must repeat on several consecutive
 //     frames. Drops (the crucible touching the cell) or returns to a recently
 //     seen level need 3 frames; a jump above anything recently seen - physically
-//     impossible for metal pouring in - must persist for 3 s.
+//     impossible for metal pouring in - or a drop of more than 5 t must persist
+//     for 3 s.
 //   * a frame the reader could not decide on its own (e.g. "7" vs "9", a faint
 //     segment) is accepted as the value inside the band that its digits fit
 //     almost as well as their best reading - the prior resolves the ambiguity.
-//     Not while a jump is pending, when the display may have changed.
+//     Not while a jump is pending, when the display may have changed, nor after
+//     20 s of such guesses without one clear reading.
+//   * a clear reading that is the expected value with a digit lost or added
+//     (17000 read as 1700 or 7000 when a "0" or the "1" drowns in the glow) is
+//     refused however often it repeats - also for a minute after the readings
+//     stopped, so it cannot take over when the history is started afresh.
+//
+// While the readings stop (the reader can't make out the digits), the band of
+// that prediction must grow at the fastest rate metal could pour. The tap
+// engine knows the actual rate: given its expectation (TapEngine.expectation),
+// the prediction comes from there instead - also once the history is stale -
+// so the prior keeps resolving unclear frames through a long spell of them.
 //
 // The reader supplies, per digit position, the cost of reading that glyph as
 // each digit 0-9 (sevenseg.js "lattice"); costs are L1 distances between the
@@ -31,24 +43,69 @@ export const TRACK_DEFAULTS = {
   lockFrames: 2,           // consistent frames needed to lock on at the start
   relockFrames: 3,         // consistent frames needed to believe a jump
   relockWindowSec: 1.5,    // max gap between frames counted towards a jump
-  implausibleSec: 3,       // an upward jump above anything recent must persist this long
-  maxDropKg: 5000,         // larger drops are treated like implausible jumps
+  implausibleSec: 3,       // an upward jump above anything recent must persist this long,
+  maxDropKg: 5000,         // ... and so must a larger drop
+  slipSec: 60,             // how long the last level is remembered for refusing a digit slip
   minBandSteps: 3,
   maxBandSteps: 10,
   maxRateKgS: 50,          // physical limit used to widen the band after gaps
   rescueMaxDelta: 1.2,     // an undecided frame is resolved if its digits fit this well
   rescueMaxDigitCost: 2.0, // ... and no single digit fits worse than this
-  rescueMinMargin: 0.6,    // ... and clearly better than any other value in the band
+  rescueMinMargin: 0.6,    // ... and clearly better than any other value it could be
   rescueMaxBandSteps: 4,   // only when readings are steady (not during a bouncing touch)
+  rescueMaxSec: 20,        // ... and a clear reading was accepted this recently
+  touchKg: 2000,           // how far a touch can pull the reading down unseen (see bestInBand)
 };
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
+
+// b is a with one character added
+function oneMore(a, b) {
+  if (b.length !== a.length + 1) return false;
+  let i = 0;
+  while (i < a.length && a[i] === b[i]) i++;
+  return a.slice(i) === b.slice(i + 1);
+}
+
+/**
+ * Is reading v a value in lo..hi with one digit lost or one added? (17000 -> 1700,
+ * 7000; 9950 -> 19950.) A genuine change of the weight almost never lands there.
+ */
+export function digitSlip(v, lo, hi, cfg) {
+  const mult = cfg.multiplier || 1, step = cfg.stepKg || 50;
+  const s = String(Math.round(v / mult));
+  for (let x = Math.max(step, Math.ceil(lo / step) * step); x <= hi; x += step) {
+    const xs = String(Math.round(x / mult));
+    if (oneMore(xs, s) || oneMore(s, xs)) return true;
+  }
+  return false;
+}
+
+/** May an unclear frame be read as nb (from bestInBand) with this prediction? */
+export function canRescue(nb, pred, cfg) {
+  if (!nb || !pred || !nb.inBand) return false;
+  // Only in a narrow band: the wider it is (a bouncing touch, a long spell without
+  // readings), the likelier a misread digit lands on a value inside it.
+  return pred.band <= cfg.rescueMaxBandSteps * (cfg.stepKg || 50) && nb.excess <= cfg.rescueMaxDelta &&
+    nb.maxDigitCost <= cfg.rescueMaxDigitCost && nb.margin >= cfg.rescueMinMargin;
+}
+
+// prediction from the tap engine's expectation {lo, hi, level, high}
+function fromExpectation(e, c) {
+  if (!e || !(e.hi >= e.lo)) return null;
+  const band = Math.max(c.minBandSteps * (c.stepKg || 50), (e.hi - e.lo) / 2);
+  return { value: (e.lo + e.hi) / 2, band, level: e.level ?? (e.lo + e.hi) / 2, slope: 0, high: e.high ?? e.hi, external: true };
+}
 
 /**
  * Best reading of a frame near the prediction, given its per-digit costs.
  * Values are scored over a neighbourhood wider than the band, so a value just
  * outside the band that fits the digits better is noticed (the returned best is
- * then flagged !inBand and must not be used to rescue the frame).
+ * then flagged !inBand and must not be used to rescue the frame). When the
+ * prediction comes from the tap engine (no recent readings), a touch may have
+ * pulled the reading down meanwhile: the neighbourhood then reaches touchKg
+ * below the band, so a frame is not "corrected" up to the expected weight while
+ * the crucible rests on the cell unseen.
  */
 export function bestInBand(lattice, pred, cfg) {
   if (!lattice || !pred) return null;
@@ -58,7 +115,8 @@ export function bestInBand(lattice, pred, cfg) {
   for (const c of costs) bestCost += Math.min(...c);
   const wide = pred.band + Math.max(500, 2 * pred.band);
   let best = null, second = null;
-  const lo = Math.ceil((pred.value - wide) / step) * step;
+  const below = pred.external ? Math.max(wide, pred.band + (cfg.touchKg ?? 0)) : wide;
+  const lo = Math.ceil((pred.value - below) / step) * step;
   for (let v = lo; v <= pred.value + wide; v += step) {
     if (v < cfg.minKg || v > cfg.maxKg) continue;
     const ds = String(Math.round(v / mult));
@@ -84,11 +142,30 @@ export function bestInBand(lattice, pred, cfg) {
 export class DisplayTracker {
   constructor() { this.reset(); }
 
-  reset() { this.hist = []; this.pending = null; }
+  reset() { this.hist = []; this.pending = null; this.last = null; this.peak = null; this.lastClear = -Infinity; }
 
-  /** Predicted display value at time t (null before lock-on or after a long gap). */
-  predict(t, cfg = {}) {
+  /**
+   * Predicted display value at time t: {value, band, high}, null before lock-on or
+   * after a long gap. `expect` ({lo, hi, level, high} in kg, from the tap engine) stands
+   * in when the recent readings can't say more ({..., external: true}).
+   */
+  predict(t, cfg = {}, expect = null) {
     const c = { ...TRACK_DEFAULTS, ...cfg };
+    const own = this.ownPredict(t, c);
+    const ext = fromExpectation(expect, c);
+    if (!ext) return own;
+    if (!own) return ext;
+    // Without readings for a while, the band has grown at the fastest rate metal could
+    // pour; the engine knows the real rate. (Not when the two disagree: during a touch
+    // the readings follow the scale down, the engine does not.)
+    const jitterSteady = own.jitter <= c.rescueMaxBandSteps * (c.stepKg || 50);
+    if (own.gap > 0 && jitterSteady && ext.band < own.band && own.level >= expect.lo - own.jitter && own.level <= expect.hi + own.jitter) {
+      return { ...ext, high: Math.max(own.high, ext.high) };
+    }
+    return own;
+  }
+
+  ownPredict(t, c) {
     const H = this.hist;
     if (!H.length) return null;
     const last = H[H.length - 1];
@@ -105,16 +182,46 @@ export class DisplayTracker {
     const res = H.slice(-30).map((h) => Math.abs(h.v - (level + slope * (h.t - tl))));
     const sig = 1.4826 * median(res);
     const step = c.stepKg || 50;
-    const gap = Math.max(0, t - last.t - 1);
-    const band = clamp(4 * sig, c.minBandSteps * step, c.maxBandSteps * step) + c.maxRateKgS * gap;
+    const jitter = clamp(4 * sig, c.minBandSteps * step, c.maxBandSteps * step);
+    const gap = c.maxRateKgS * Math.max(0, t - last.t - 1);
     let high = -Infinity;
     for (const h of H) if (h.v > high) high = h.v;
-    return { value, band, level, slope, high };
+    return { value, band: jitter + gap, level, slope, high, jitter, gap };
   }
 
   accept(t, v, c) {
     this.hist.push({ t, v });
+    this.remember(t, v, c);
     while (this.hist.length && this.hist[0].t < t - c.historySec) this.hist.shift();
+  }
+
+  // the last accepted value, and the highest one of the last slipSec (the weight comes
+  // back to it after a touch)
+  remember(t, v, c) {
+    this.last = { t, v };
+    if (!this.peak || v >= this.peak.v || t - this.peak.t > c.slipSec) this.peak = { t, v };
+  }
+
+  /**
+   * Is v the expected value (or, for slipSec after the last accepted reading, a value
+   * the reading could have reached since: up at the fastest pouring rate, down by a
+   * touch) with a digit lost or added?
+   */
+  isSlip(t, v, p, c) {
+    if (p && Math.abs(v - p.value) <= p.band) return false;
+    if (p && digitSlip(v, p.value - p.band, p.value + p.band, c)) return true;
+    const L = this.last;
+    if (!L || t - L.t > c.slipSec) return false;
+    const step = c.stepKg || 50;
+    const top = t - this.peak.t <= c.slipSec ? Math.max(L.v, this.peak.v) : L.v;
+    return digitSlip(v, L.v - c.touchKg, top + c.maxRateKgS * (t - L.t) + c.minBandSteps * step, c);
+  }
+
+  /** Would an unclear frame be resolved as nb (from bestInBand) now? */
+  willRescue(t, nb, p, c) {
+    if (this.pending && t - this.pending.tLast <= c.relockWindowSec) return false; // a jump is being checked
+    // (a long run of guesses without one clear reading may have drifted off)
+    return t - this.lastClear <= c.rescueMaxSec && canRescue(nb, p, c);
   }
 
   /** Count a reading towards a pending jump (or the initial lock); re-lock when convincing. */
@@ -129,6 +236,8 @@ export class DisplayTracker {
     const Q = this.pending;
     if (Q.n >= needFrames && Q.tLast - Q.t0 >= needSec) {
       this.hist = Q.vals.slice();
+      this.remember(t, v, c);
+      this.lastClear = t;
       this.pending = null;
       return { value: v, how: kind === 'lock' ? 'locked' : 'jump-accepted' };
     }
@@ -143,15 +252,20 @@ export class DisplayTracker {
   decide(t, attempts, cfg = {}, pred = undefined) {
     const c = { ...TRACK_DEFAULTS, ...cfg };
     const p = pred === undefined ? this.predict(t, c) : pred;
-    const strictR = attempts.find((r) => r.ok) || null;
+    // clear readings, those in the band first; a digit slip counts as no reading
+    const oks = attempts.filter((r) => r.ok);
+    const sound = oks.filter((r) => !this.isSlip(t, r.value, p, c));
+    const strictR = (p && sound.find((r) => Math.abs(r.value - p.value) <= p.band)) || sound[0] || null;
     const strict = strictR ? strictR.value : null;
+    const nothing = sound.length < oks.length ? 'digit-slip' : 'unread';
     if (!p) {
-      if (strict == null) return { value: null, how: 'unread', pred: null };
+      if (strict == null) return { value: null, how: nothing, pred: null };
       return { ...this.confirm(t, strict, c, c.lockFrames, 0, 'lock'), pred: null };
     }
     if (strict != null && Math.abs(strict - p.value) <= p.band) {
       this.pending = null;
       this.accept(t, strict, c);
+      this.lastClear = t;
       return { value: strict, how: 'ok', pred: p, from: strictR };
     }
     // the best in-band interpretation of this frame's digits
@@ -161,17 +275,19 @@ export class DisplayTracker {
       if (nb && (!near || nb.excess < near.excess)) { near = nb; nearR = r; }
     }
     if (strict != null) {
-      // a clear reading away from the prediction: a genuine change only if it repeats
-      const fast = (strict < p.value && p.value - strict <= c.maxDropKg) || strict <= p.high + p.band;
+      // A clear reading away from the prediction: a genuine change only if it repeats.
+      // Quickly for a drop (the crucible touching the cell) or a return to a level just
+      // seen; a rise above anything recent - impossible for pouring metal - or a drop of
+      // more than maxDropKg must persist for implausibleSec.
+      const drop = p.value - strict;
+      const fast = drop > 0 ? drop <= c.maxDropKg : strict <= p.high + p.band;
       const j = this.confirm(t, strict, c, c.relockFrames, fast ? 0 : c.implausibleSec, 'jump');
       return { ...j, pred: p, near, from: j.value != null ? strictR : undefined };
     }
-    const jumpPending = this.pending && t - this.pending.tLast <= c.relockWindowSec;
-    const steady = p.band <= c.rescueMaxBandSteps * (c.stepKg || 50);
-    if (!jumpPending && steady && near && near.inBand && near.excess <= c.rescueMaxDelta && near.maxDigitCost <= c.rescueMaxDigitCost && near.margin >= c.rescueMinMargin) {
+    if (this.willRescue(t, near, p, c)) {
       this.accept(t, near.v, c);
       return { value: near.v, how: 'prior', pred: p, near, from: nearR };
     }
-    return { value: null, how: 'unread', pred: p, near };
+    return { value: null, how: nothing, pred: p, near };
   }
 }
