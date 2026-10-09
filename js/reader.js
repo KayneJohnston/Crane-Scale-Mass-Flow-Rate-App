@@ -2,6 +2,7 @@
 // <canvas> with drawImage and runs readFrame() on them.
 
 import { readFrame } from './vision/pipeline.js';
+import { DisplayTracker } from './vision/tracker.js';
 
 export class BrowserReader {
   constructor() {
@@ -36,4 +37,14 @@ export class BrowserReader {
   }
 
   resetTracking() { this.track = {}; }
+
+  /**
+   * The person read v off the display at time t (corrected: the reading they corrected).
+   * Returns what untell() needs to take it back.
+   */
+  tell(t, v, cfg, corrected = null) {
+    return (this.track.tracker ||= new DisplayTracker()).told(t, v, cfg, corrected);
+  }
+
+  untell(undo) { this.track.tracker?.undoTold(undo); }
 }

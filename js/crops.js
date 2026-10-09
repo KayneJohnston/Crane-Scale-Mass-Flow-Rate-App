@@ -13,7 +13,7 @@ export const CROP_DEFAULTS = {
 };
 
 // for the list: what to review first
-export const KIND_ORDER = { unread: 0, refused: 1, unsure: 2, sample: 3 };
+export const KIND_ORDER = { unread: 0, refused: 1, unsure: 2, sample: 3, asked: 4, corrected: 5 };
 
 /** Is this reading (from readFrame) worth keeping for review, and as what? */
 export function cropKind(res) {
@@ -107,10 +107,11 @@ export function reviewOrder(crops) {
 
 /** How the app did on the labelled crops. */
 export function reviewStats(crops) {
-  const s = { total: crops.length, todo: 0, labelled: 0, unreadable: 0, guessed: 0, guessedRight: 0, clear: 0, clearRight: 0, unread: 0, withTop: 0, topRight: 0 };
+  const s = { total: crops.length, todo: 0, labelled: 0, unreadable: 0, guessed: 0, guessedRight: 0, clear: 0, clearRight: 0, unread: 0, withTop: 0, topRight: 0, answered: 0 };
   for (const c of crops) {
     if (c.label == null) { s.todo++; continue; }
     s.labelled++;
+    if (c.kind === 'asked' || c.kind === 'corrected') s.answered++; // labelled while filming
     if (c.label === 'unreadable') { s.unreadable++; continue; }
     if (c.how === 'prior') { s.guessed++; if (c.value === c.label) s.guessedRight++; }
     else if (c.value != null) { s.clear++; if (c.value === c.label) s.clearRight++; }

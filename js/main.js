@@ -13,8 +13,9 @@ import { TimeChart, COLORS, fmtClock, fmtInt, nearestIndex } from './ui/chart.js
 import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from './export.js';
 import { CropStore, CropPolicy, CROP_DEFAULTS, cropRect, cropRecord, choicesFor, reviewOrder, reviewStats, exportFiles, cropsToDrop } from './crops.js';
 import { makeZip } from './zip.js';
+import { AskPolicy, ASK_DEFAULTS, askChoices, digitParts } from './ask.js';
 
-export const VERSION = '0.4.0';
+export const VERSION = '0.5.0';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -29,6 +30,7 @@ const video = $('video'), simCanvas = $('simCanvas'), overlay = $('overlay'), ca
 const camera = new Camera(video);
 const crops = new CropStore();
 const cropPolicy = new CropPolicy();
+const askPolicy = new AskPolicy();
 
 const app = {
   source: null,               // null | 'camera' | 'video' | 'demo'
@@ -159,7 +161,7 @@ function setupGestures() {
   camBox.addEventListener('pointerdown', (e) => {
     app.undimUntil = performance.now() + 15000;
     camBox.classList.remove('dim');
-    if (e.target.closest('.cam-zoom, .cam-start')) return;
+    if (e.target.closest('.cam-zoom, .cam-start, .cam-correct')) return;
     pts.set(e.pointerId, { x: e.clientX, y: e.clientY });
     camBox.setPointerCapture?.(e.pointerId);
     if (pts.size === 1) {
@@ -208,6 +210,7 @@ async function startCamera() {
     app.engine = makeEngine();
     reader.resetTracking();
     cropPolicy.reset();
+    askPolicy.reset();
     $('camStart').hidden = true;
     wake.request();
     app.hwZoom = 1;
@@ -260,7 +263,9 @@ async function stopSources({ keepUi = false } = {}) {
   if (app.engine?.sess) app.engine.endSession('manual');
   camera.stop();
   if (video.src) { URL.revokeObjectURL(video.src); video.removeAttribute('src'); video.load(); }
+  closeAsk();
   app.demo = null; app.vid = null; app.source = null; app.engine = null; app.lastRes = null;
+  syncCorrectButton();
   app.okSince = app.failSince = null;
   camBox.classList.remove('dim');
   wake.release();
@@ -459,6 +464,7 @@ function processFrame(el, w, h, T, wall) {
   const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug, expect }, T);
   app.lastRes = res;
   collectCrop(res, el, w, h, T, wall);
+  if (app.source === 'camera') considerAsk(res, T);
   if (res.located) app.foundAt = performance.now();
   app.engine.pushFrame(T, wall, res.ok ? res.value : null, res.conf, res.how);
   app.frames++;
@@ -530,9 +536,14 @@ const review = { count: { total: 0, todo: 0 }, full: false, cur: null, edit: nul
 function collectCrop(res, el, w, h, T, wall) {
   if (!settings.collectCrops || (app.source !== 'camera' && app.source !== 'video') || review.full) return;
   const kind = cropPolicy.consider(res, T);
-  if (!kind) return;
-  const rect = cropRect(res.located, w, h);
-  if (!rect) return;
+  if (kind) keepCrop(res, kind, el, w, h, T, wall);
+}
+
+// Copy the display out of the frame now, store it when encoded. label: what the person
+// said it showed. Resolves to the crop's id, or null.
+function keepCrop(res, kind, el, w, h, T, wall, label = null) {
+  const rect = res?.located ? cropRect(res.located, w, h) : null;
+  if (!rect) return Promise.resolve(null);
   const cv = document.createElement('canvas');
   cv.width = rect.outW; cv.height = rect.outH;
   const ctx = cv.getContext('2d');
@@ -540,15 +551,18 @@ function collectCrop(res, el, w, h, T, wall) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(el, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.outW, rect.outH);
   const meta = cropRecord(res, kind, { t: T, wall, source: app.source, rect });
-  cv.toBlob(async (blob) => {
-    if (!blob) return;
+  if (label != null) { meta.label = label; meta.labelledAt = wall; }
+  return new Promise((resolve) => cv.toBlob(async (blob) => {
+    if (!blob) { resolve(null); return; }
     try {
       await crops.add(meta, await blobBytes(blob));
-      review.count.total++; review.count.todo++;
+      review.count.total++;
+      if (label == null) review.count.todo++;
       if (review.count.total > CROP_DEFAULTS.maxCrops) await trimCrops();
       updateReviewBadge();
-    } catch (e) { console.warn('crop not kept', e); }
-  }, 'image/png');
+      resolve(meta.id);
+    } catch (e) { console.warn('crop not kept', e); resolve(null); }
+  }, 'image/png'));
 }
 
 const blobBytes = (b) => (b.arrayBuffer ? b.arrayBuffer() : new Response(b).arrayBuffer());
@@ -603,6 +617,8 @@ function describeCrop(c) {
   if (c.kind === 'unsure') lines.push(`Given as ≈${fmtInt(c.value)} kg, ${probText(c.conf ?? 0)} probable`);
   else if (c.kind === 'sample') lines.push(`Read clearly as ${fmtInt(c.value)} kg`);
   else if (c.kind === 'refused') lines.push(`Read ${c.strict != null ? fmtInt(c.strict) + ' kg' : 'something'}, not believed (${c.how === 'digit-slip' ? 'a digit lost?' : 'far from the readings before'})`);
+  else if (c.kind === 'asked') lines.push('Couldn’t read it, so it asked you');
+  else if (c.kind === 'corrected') lines.push(c.value != null ? `Read ${c.how === 'prior' ? '≈' : ''}${fmtInt(c.value)} kg; you corrected it` : 'You told it the value');
   else lines.push('Couldn’t read it');
   if (c.kind !== 'unsure' && c.kind !== 'sample' && c.candidates?.length) {
     lines.push(`Most probable: ${c.candidates.map((x) => `${fmtInt(x.v)} (${probText(x.p)})`).join(', ')}`);
@@ -658,6 +674,7 @@ function renderReviewStats(list) {
   if (s.guessed) lines.push(`Most probable value given: right ${s.guessedRight} of ${s.guessed} times`);
   if (s.clear) lines.push(`Clear readings: right ${s.clearRight} of ${s.clear}`);
   if (s.withTop) lines.push(`Not read or not believed: the most probable value was right ${s.topRight} of ${s.withTop} times`);
+  if (s.answered) lines.push(`Answered while filming: ${s.answered}`);
   const T = review.test;
   if (T) lines.push(`Reader test on ${T.n} labelled pictures: ${T.ok} read right, ${T.none} not read, ${T.wrong} misread`);
   if (review.full) lines.push(`Storage full (${CROP_DEFAULTS.maxCrops} pictures, all labelled): export them, then delete them to keep collecting.`);
@@ -767,6 +784,194 @@ async function clearCrops() {
   toast('Deleted');
 }
 
+// ------------------------------------- asking what the display shows --
+
+// The question card (ask.js). open: {kind: 'ask' (the reader can't tell) | 'correct' (the
+// person opened it with ✎), res: the reading it was opened on, choices, stage: 'choose' |
+// 'other' | 'done', opened: when it appeared (ms), step: the value in "Other value",
+// timer, undo, cropId}
+const asking = { open: null };
+const nowSec = () => performance.now() / 1000; // the clock of the camera frames
+
+function askAllowed() {
+  const m = settings.askMode || 'always';
+  return app.source === 'camera' && (m === 'always' || (m === 'tap' && !!app.engine?.sess));
+}
+
+function considerAsk(res, T) {
+  const q = asking.open;
+  if (q) {
+    // the app reads the display again by itself: the question has answered itself
+    if (q.kind === 'ask' && q.stage === 'choose' && res.ok) { askPolicy.readAgain(T); closeAsk(); }
+    return;
+  }
+  askPolicy.c.afterSec = Math.max(1, +settings.askAfterSec || ASK_DEFAULTS.afterSec);
+  if (askPolicy.frame(res, T, askAllowed())) openAsk('ask', res);
+}
+
+function openAsk(kind, res) {
+  const step = +settings.stepKg || 50;
+  const choices = askChoices(res || {}, readerConfig(settings), { correct: kind === 'correct', fallback: app.engine?.lastValue ?? null });
+  if (!choices.length && kind === 'ask') return;
+  if (asking.open) clearTimeout(asking.open.timer);
+  const mid = Math.round((+settings.minKg + +settings.maxKg) / 2 / step) * step;
+  const q = { kind, res, choices, stage: 'choose', opened: performance.now(), step: choices[Math.floor(choices.length / 2)] ?? app.engine?.lastValue ?? mid };
+  asking.open = q;
+  const sub = $('askSub');
+  sub.hidden = kind !== 'correct';
+  sub.textContent = kind !== 'correct' ? '' : res?.ok ? `The app reads ${res.how === 'prior' ? '≈' : ''}${fmtInt(res.value)}` : 'The app can’t read it';
+  const box = $('askAnswers');
+  box.replaceChildren();
+  digitParts(choices, fmtInt).forEach((parts, i) => {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.setAttribute('aria-label', `${fmtInt(choices[i])} kg`);
+    for (const p of parts) {
+      const sp = document.createElement('span');
+      if (p.hi) sp.className = 'hi'; // the digits that differ between the values offered
+      sp.textContent = p.t;
+      b.appendChild(sp);
+    }
+    b.addEventListener('click', () => answerAsk(choices[i]));
+    box.appendChild(b);
+  });
+  box.hidden = !choices.length;
+  for (const b of $('askSteps').querySelectorAll('button')) {
+    const n = +b.dataset.steps;
+    b.textContent = `${n < 0 ? '−' : '+'}${fmtInt(Math.abs(n) * step)}`;
+  }
+  $('askCard').hidden = false;
+  showAskStage(choices.length ? 'choose' : 'other');
+  syncCorrectButton();
+}
+
+function showAskStage(stage) {
+  const q = asking.open;
+  if (!q) return;
+  q.stage = stage;
+  $('askChoose').hidden = stage !== 'choose';
+  $('askOther').hidden = stage !== 'other';
+  $('askDone').hidden = stage !== 'done';
+  if (stage === 'other') $('askValue').textContent = fmtInt(q.step);
+  const sec = stage === 'done' ? ASK_DEFAULTS.undoSec : stage === 'other' ? ASK_DEFAULTS.otherSec : q.kind === 'correct' ? ASK_DEFAULTS.manualSec : ASK_DEFAULTS.openSec;
+  armAsk(sec * 1000, stage === 'done' ? 'var(--green)' : 'var(--amber)');
+}
+
+// the countdown: the bar empties, then the card closes
+function armAsk(ms, color) {
+  const q = asking.open;
+  clearTimeout(q.timer);
+  q.timer = setTimeout(askTimedOut, ms);
+  const bar = $('askTimer');
+  bar.style.transition = 'none';
+  bar.style.background = color;
+  bar.style.transform = 'scaleX(1)';
+  void bar.offsetWidth; // (restart the transition)
+  bar.style.transition = `transform ${ms}ms linear`;
+  bar.style.transform = 'scaleX(0)';
+}
+
+function askTimedOut() {
+  const q = asking.open;
+  if (!q) return;
+  if (q.kind === 'ask' && q.stage === 'choose') askPolicy.timedOut(nowSec()); // unanswered: wait longer next time
+  else if (q.kind === 'ask' && q.stage === 'other') askPolicy.notNow(nowSec());
+  closeAsk(); // (after an answer: the answer stands)
+}
+
+function closeAsk() {
+  const q = asking.open;
+  if (!q) return;
+  clearTimeout(q.timer);
+  asking.open = null;
+  $('askCard').hidden = true;
+  syncCorrectButton();
+  renderLive(true);
+}
+
+function syncCorrectButton() {
+  const hide = app.source !== 'camera' || !!asking.open;
+  const b = $('btnCorrect');
+  if (b.hidden !== hide) b.hidden = hide;
+}
+
+// a tap in the first moment after the card appeared was meant for something else
+const askGuarded = () => !asking.open || performance.now() - asking.open.opened < ASK_DEFAULTS.guardMs;
+
+function answerAsk(v) {
+  const q = asking.open;
+  if (askGuarded() || q.stage === 'done') return;
+  const T = nowSec(), wall = Date.now(), res = app.lastRes;
+  const corrected = q.kind === 'correct' && q.res?.ok && q.res.value !== v ? q.res.value : null;
+  q.undo = reader.tell(T, v, readerConfig(settings), corrected);
+  app.engine?.pushFrame(T, wall, v, 1, 'told');
+  askPolicy.answered(T);
+  q.cropId = null; q.undone = false;
+  const keep = settings.collectCrops && !review.full && res?.located && app.source === 'camera';
+  if (keep) {
+    keepCrop(res, q.kind === 'correct' ? 'corrected' : 'asked', video, video.videoWidth, video.videoHeight, T, wall, v).then((id) => {
+      if (!id) return;
+      if (q.undone) crops.delete(id).then(() => { review.count.total--; updateReviewBadge(); }).catch(() => {});
+      else q.cropId = id;
+    });
+  }
+  $('askDoneV').textContent = `✓ ${fmtInt(v)} kg`;
+  $('askDoneSub').textContent = keep ? 'Counted as a reading, and its picture saved to Review' : 'Counted as a reading';
+  showAskStage('done');
+}
+
+// a mistaken tap: the reader forgets the answer, Review its picture; ask again. (The one
+// reading the answer gave stays in the tap's data, where it changes next to nothing.)
+function undoAnswer() {
+  const q = asking.open;
+  if (!q || q.stage !== 'done') return;
+  reader.untell(q.undo);
+  q.undone = true;
+  if (q.cropId) crops.delete(q.cropId).then(() => { review.count.total--; updateReviewBadge(); }).catch(() => {});
+  q.cropId = null;
+  q.opened = performance.now();
+  showAskStage(q.choices.length ? 'choose' : 'other');
+}
+
+function cantTell() {
+  const q = asking.open;
+  if (askGuarded()) return;
+  if (q.kind === 'ask') {
+    const T = nowSec(), wall = Date.now(), res = app.lastRes;
+    askPolicy.notNow(T);
+    if (settings.collectCrops && !review.full && res?.located) keepCrop(res, 'asked', video, video.videoWidth, video.videoHeight, T, wall, 'unreadable');
+    toast('OK. No questions for a minute');
+  }
+  closeAsk();
+}
+
+function notNowAsk() {
+  const q = asking.open;
+  if (!q) return;
+  if (q.kind === 'ask') askPolicy.notNow(nowSec());
+  closeAsk();
+}
+
+// "Other value": starts from what the app expects now (the display may have moved on
+// since the question appeared)
+function startOther() {
+  const q = asking.open;
+  if (askGuarded()) return;
+  const step = +settings.stepKg || 50;
+  const now = app.lastRes?.ok ? app.lastRes.value : app.lastRes?.pred?.value;
+  if (now != null) q.step = Math.round(now / step) * step;
+  showAskStage('other');
+}
+
+function stepAsk(n) {
+  const q = asking.open;
+  if (!q || q.stage !== 'other') return;
+  const step = +settings.stepKg || 50;
+  q.step = clamp(q.step + n * step, Math.max(step, +settings.minKg || 0), +settings.maxKg || 1e6);
+  $('askValue').textContent = fmtInt(q.step);
+  armAsk(ASK_DEFAULTS.otherSec * 1000, 'var(--amber)');
+}
+
 // ------------------------------------------------------------ overlay --
 
 function clearOverlay() {
@@ -804,7 +1009,8 @@ function drawOverlay(res, v) {
   // "≈": an unclear frame resolved using the value expected from the previous readings,
   // with how probable that value is
   if (res.ok) { b.textContent = res.how === 'prior' ? `≈${fmtInt(res.value)} kg · ${probText(res.conf)}` : `${fmtInt(res.value)} kg`; b.classList.remove('bad'); }
-  else { b.textContent = reasonText(res); b.classList.add('bad'); }
+  else { b.textContent = asking.open?.kind === 'ask' ? 'Not sure: asking you' : reasonText(res); b.classList.add('bad'); }
+  syncCorrectButton();
 }
 
 // 0.9973 -> "99.7%"; never rounds up to 100%
@@ -818,6 +1024,7 @@ function reasonText(res) {
   if (r === 'locking') return 'Locking on…';
   if (r === 'jump-pending') return `Checking ${res.strict != null ? fmtInt(res.strict) : 'jump'}…`;
   if (r === 'digit-slip') return `Ignoring ${res.strict != null ? fmtInt(res.strict) : 'reading'} — digit lost?`;
+  if (r === 'vetoed') return `Ignoring ${res.strict != null ? fmtInt(res.strict) : 'reading'} — you corrected it`;
   if (r === 'no-display' || r === 'not-found') return 'Looking for red digits…';
   if (r.startsWith('invalid-range')) return `Out of range (${res.text || '?'})`;
   if (r.startsWith('invalid-step')) return `Not a ${settings.stepKg} kg step (${res.text})`;
@@ -923,7 +1130,7 @@ function renderLive(withChart = false) {
   renderTilesAndInfo(snap);
   updateAlarm(snap);
   updateControls();
-  if (withChart) { app.lastChart = performance.now(); liveChart.render(liveSpec(snap)); }
+  if (withChart && !asking.open) { app.lastChart = performance.now(); liveChart.render(liveSpec(snap)); }
 }
 
 function renderPill(snap) {
@@ -1505,6 +1712,15 @@ function wire() {
       renderHistory();
     } catch (err) { toast(`Import failed: ${err.message}`); }
   });
+  // asking what the display shows
+  $('btnAskClose').addEventListener('click', notNowAsk);
+  $('btnAskOther').addEventListener('click', startOther);
+  $('btnAskCant').addEventListener('click', cantTell);
+  $('btnAskBack').addEventListener('click', () => showAskStage('choose'));
+  $('btnAskUse').addEventListener('click', () => asking.open && answerAsk(asking.open.step));
+  for (const b of $('askSteps').querySelectorAll('button')) b.addEventListener('click', () => stepAsk(+b.dataset.steps));
+  $('btnAskUndo').addEventListener('click', undoAnswer);
+  $('btnCorrect').addEventListener('click', () => { if (app.source === 'camera') openAsk('correct', app.lastRes); });
   // review
   $('reviewForm').addEventListener('submit', (e) => { e.preventDefault(); submitReviewValue(); });
   $('btnReviewUnreadable').addEventListener('click', () => review.cur && labelCrop(review.cur, 'unreadable'));

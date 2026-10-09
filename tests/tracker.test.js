@@ -341,3 +341,76 @@ test('the held value fades: less sure the longer ago, the more often the display
   for (let i = 0; i < 40; i++) busy.decide(i * 0.1, [clear(14800 + 50 * (Math.floor(i / 5) % 2))], CFG);
   assert.ok(busy.holdOf(4.0, C).q > 2 * tr.holdOf(1.2, C).q);
 });
+
+// ------------------------------------------------ values read off by the person --
+
+test('a value the person reads off the display is taken like a clear reading', () => {
+  // before the first reading: the history starts from it
+  const tr = new DisplayTracker();
+  tr.told(0, 20050, CFG);
+  assert.equal(tr.predict(0.1, CFG).value, 20050);
+  assert.equal(tr.decide(0.2, [clear(20100)], CFG).how, 'ok');
+  // far from the readings (they were wrong): the history starts afresh from it
+  const tr2 = locked(0, 20050);
+  tr2.told(1.5, 18050, CFG);
+  assert.ok(Math.abs(tr2.predict(1.6, CFG).value - 18050) < 1);
+  assert.equal(tr2.decide(1.7, [clear(18100)], CFG).how, 'ok');
+});
+
+test('after an answer, unclear frames are read with it even if they look more like another value', () => {
+  // 14800 shown, its faint 8 fitting a 9 a little better: on its own the frame says 14900
+  const lat = () => lattice('14800', { 2: { 8: 1.2, 9: 1.0 } });
+  const C = { ...TRACK_DEFAULTS, ...CFG };
+  const tr = locked(0, 14700);
+  assert.equal(valuePosterior(lat(), tr.predict(1.2, CFG), C).v, 14900);
+  tr.told(1.2, 14800, CFG);
+  const d = tr.decide(1.3, [unread(lat())], CFG);
+  assert.equal(d.how, 'prior');
+  assert.equal(d.value, 14800);
+  // a clear reading of 14800 would not do that: the frame points elsewhere
+  const tr2 = locked(0, 14700);
+  tr2.decide(1.2, [clear(14800)], CFG);
+  assert.equal(tr2.decide(1.3, [unread(lat())], CFG).value, null);
+  // ... and after toldSec the answer no longer counts
+  const tr3 = locked(0, 14700);
+  tr3.told(1.2, 14800, CFG);
+  assert.equal(tr3.holdOf(7.5, C), null);
+});
+
+test('a reading the person corrected is refused until the display shows another value', () => {
+  // the same misread on every frame (a half-hidden digit): refused all along
+  const tr = locked(0, 21850); // misread: the display shows 21800
+  tr.told(1.2, 21800, CFG, 21850);
+  for (let t = 1.3; t < 30; t += 0.1) {
+    const d = tr.decide(t, [clear(21850)], CFG);
+    assert.equal(d.value, null, `believed again at ${t.toFixed(1)}`);
+    assert.equal(d.how, 'vetoed');
+  }
+  // ... nor guessed from an unclear frame
+  const tr2 = locked(0, 21850);
+  tr2.told(1.2, 21800, CFG, 21850);
+  assert.notEqual(tr2.decide(1.3, [unread(lattice('21850'))], CFG).value, 21850);
+  // the display moves on to a new value: the reading corrected may be right again
+  const tr3 = locked(0, 21850);
+  tr3.told(1.2, 21800, CFG, 21850);
+  assert.equal(tr3.decide(1.3, [clear(21800)], CFG).how, 'ok'); // what the person said: the refusal goes on
+  assert.equal(tr3.decide(1.4, [clear(21850)], CFG).how, 'vetoed');
+  assert.equal(tr3.decide(1.5, [clear(21900)], CFG).how, 'ok');
+  assert.equal(tr3.decide(1.6, [clear(21850)], CFG).how, 'ok');
+  // ... or after a minute
+  const tr4 = locked(0, 21850);
+  tr4.told(1.2, 21800, CFG, 21850);
+  assert.equal(tr4.vetoOf(60, { ...TRACK_DEFAULTS, ...CFG }), 21850);
+  assert.equal(tr4.vetoOf(62, { ...TRACK_DEFAULTS, ...CFG }), null);
+});
+
+test('a mistaken answer can be taken back', () => {
+  const C = { ...TRACK_DEFAULTS, ...CFG };
+  const tr = locked(0, 20050);
+  const u = tr.told(1.5, 18050, CFG);
+  tr.decide(1.6, [clear(18100)], CFG);
+  tr.undoTold(u);
+  assert.ok(tr.hist.every((h) => h.v !== 18050));
+  assert.ok(tr.hist.some((h) => h.v === 20050) && tr.hist.some((h) => h.v === 18100));
+  assert.ok(!tr.holdOf(1.7, C)?.told);
+});

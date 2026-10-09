@@ -22,6 +22,10 @@
 //     reading, the display most likely still shows that value (it holds a value for
 //     seconds): if that is also the frame's own best guess, it counts as much more
 //     probable - the less so, the longer ago and the more often the readings changed.
+//   * a value the person filming read off the display (the app asks when unsure, or
+//     they correct it) is taken like a clear reading, and for 6 s it counts in the
+//     same way even for frames that look more like another value. A reading they
+//     corrected is refused until the display shows another value (or for a minute).
 //   * a clear reading that is the expected value with a digit lost or added
 //     (17000 read as 1700 or 7000 when a "0" or the "1" drowns in the glow) is
 //     refused however often it repeats - also for a minute after the readings
@@ -64,6 +68,9 @@ export const TRACK_DEFAULTS = {
   holdLast: true,          // within freshSec of a clear reading the display most likely still shows it,
   minChangeRate: 0.3,      // ... unless it changed: at least this often (per s), or as often as the readings did,
   clearMisread: 0.01,      // ... or the clear reading was wrong
+  toldSec: 6,              // a value read off the display by the person holds this long,
+  toldMisread: 0.002,      // ... and is wrong this often;
+  vetoSec: 60,             // ... a reading they corrected is refused for at most this long
   ...POSTERIOR_DEFAULTS,   // the picture and dead-reckoning model (posterior.js)
 };
 
@@ -116,7 +123,7 @@ function fromExpectation(e, c) {
 export class DisplayTracker {
   constructor() { this.reset(); }
 
-  reset() { this.hist = []; this.pending = null; this.last = null; this.peak = null; this.lastClear = -Infinity; this.lastClearV = null; }
+  reset() { this.hist = []; this.pending = null; this.last = null; this.peak = null; this.lastClear = -Infinity; this.lastClearV = null; this.toldV = null; }
 
   /**
    * Predicted display value at time t: {value, band, high}, null before lock-on or
@@ -169,8 +176,20 @@ export class DisplayTracker {
     while (this.hist.length && this.hist[0].t < t - c.historySec) this.hist.shift();
   }
 
-  // a clear reading was accepted
-  cleared(t, v) { this.lastClear = t; this.lastClearV = v; }
+  // a clear reading was accepted: if it is neither what the person said nor what they
+  // corrected, the display has moved on, and the reading corrected may be right again
+  cleared(t, v) {
+    this.lastClear = t; this.lastClearV = v;
+    const T = this.toldV;
+    if (T && T.veto != null && v !== T.v && v !== T.veto) this.toldV = { ...T, veto: null };
+  }
+
+  // The reading the person corrected, refused until the display shows another value or
+  // for vetoSec - however often the reader sees it: the same picture fools it the same way.
+  vetoOf(t, c) {
+    const T = this.toldV;
+    return T && T.veto != null && t - T.t <= c.vetoSec ? T.veto : null;
+  }
 
   // How often the shown value changes (per s): from the accepted readings of the last
   // historySec, but at least minChangeRate.
@@ -182,18 +201,23 @@ export class DisplayTracker {
     return Math.max(c.minChangeRate, n / Math.max(1, span));
   }
 
-  // {v, q}: the last clear reading, and the probability that the display has shown
-  // something else since
+  // {v, q, told}: the last clear reading, and the probability that the display has
+  // shown something else since; told: the person read it off the display
   holdOf(t, c) {
-    if (!c.holdLast || this.lastClearV == null || t < this.lastClear || t - this.lastClear > c.freshSec) return null;
-    return { v: this.lastClearV, q: 1 - (1 - c.clearMisread) * Math.exp(-this.changeRate(c) * (t - this.lastClear)) };
+    if (!c.holdLast || this.lastClearV == null || t < this.lastClear) return null;
+    const told = !!this.toldV && this.toldV.t === this.lastClear && this.toldV.v === this.lastClearV;
+    if (t - this.lastClear > (told ? c.toldSec : c.freshSec)) return null;
+    const miss = told ? c.toldMisread : c.clearMisread;
+    return { v: this.lastClearV, told, q: 1 - (1 - miss) * Math.exp(-this.changeRate(c) * (t - this.lastClear)) };
   }
 
   /**
    * The most probable value of an unclear frame given the prediction, and the attempt
    * (colour mode) whose glyphs fit it best. If that is the last clear reading, the
    * display most likely still shows it (holdOf): never the other way round - a frame
-   * whose own glyphs point elsewhere may show a new value.
+   * whose own glyphs point elsewhere may show a new value. What the person read off
+   * the display, though, counts for every frame: a picture that fooled the reader once
+   * fools it again.
    */
   mostProbable(t, attempts, p, c) {
     const hold = this.holdOf(t, c);
@@ -201,12 +225,38 @@ export class DisplayTracker {
     const better = (a, b) => !b || a.p > b.p + 1e-9 || (a.p > b.p - 1e-9 && a.excess < b.excess);
     for (const r of attempts) {
       const one = valuePosterior(r.lattice, p, c);
-      const held = one && hold && one.v === hold.v ? valuePosterior(r.lattice, p, c, hold) : null;
-      for (const post of [one, held]) {
+      const held = one && hold && (hold.told || one.v === hold.v) ? valuePosterior(r.lattice, p, c, hold) : null;
+      for (const post of hold?.told ? [held] : [one, held]) {
         if (post && better(post, near)) { near = post; nearR = r; }
       }
     }
     return { near, nearR };
+  }
+
+  /**
+   * A value the person read off the display at time t: asked while the frames were
+   * unclear, or correcting the app's reading (corrected). Taken like a clear reading -
+   * the history starts afresh from it if it is far from the prediction. Returns what
+   * undoTold() needs to take it back.
+   */
+  told(t, v, cfg = {}, corrected = null) {
+    const c = { ...TRACK_DEFAULTS, ...cfg };
+    const undo = { t, hist: this.hist.slice(), lastClear: this.lastClear, lastClearV: this.lastClearV, toldV: this.toldV };
+    const p = this.ownPredict(t, c);
+    this.pending = null;
+    if (!p || Math.abs(v - p.value) > p.band) this.hist = [];
+    this.accept(t, v, c);
+    this.cleared(t, v);
+    this.toldV = { t, v, veto: corrected != null && corrected !== v ? corrected : null };
+    return undo;
+  }
+
+  /** Take back a value told (a mistaken tap); readings accepted since are kept. */
+  undoTold(u) {
+    if (!u || !this.toldV || this.toldV.t !== u.t) return;
+    this.hist = [...u.hist.filter((h) => h.t < u.t), ...this.hist.filter((h) => h.t > u.t)];
+    if (this.lastClear === u.t) { this.lastClear = u.lastClear; this.lastClearV = u.lastClearV; }
+    this.toldV = u.toldV;
   }
 
   // the last accepted value, and the highest one of the last slipSec (the weight comes
@@ -268,12 +318,14 @@ export class DisplayTracker {
   decide(t, attempts, cfg = {}, pred = undefined) {
     const c = { ...TRACK_DEFAULTS, ...cfg };
     const p = pred === undefined ? this.predict(t, c) : pred;
-    // clear readings, those in the band first; a digit slip counts as no reading
+    // clear readings, those in the band first; a digit slip, or the reading the person
+    // corrected (vetoOf), counts as no reading
+    const veto = this.vetoOf(t, c);
     const oks = attempts.filter((r) => r.ok);
-    const sound = oks.filter((r) => !this.isSlip(t, r.value, p, c));
+    const sound = oks.filter((r) => r.value !== veto && !this.isSlip(t, r.value, p, c));
     const strictR = (p && sound.find((r) => Math.abs(r.value - p.value) <= p.band)) || sound[0] || null;
     const strict = strictR ? strictR.value : null;
-    const nothing = sound.length < oks.length ? 'digit-slip' : 'unread';
+    const nothing = sound.length < oks.length ? (oks.some((r) => r.value === veto) ? 'vetoed' : 'digit-slip') : 'unread';
     if (!p) {
       if (strict == null) return { value: null, how: nothing, pred: null };
       return { ...this.confirm(t, strict, c, c.lockFrames, 0, 'lock'), pred: null };
@@ -295,7 +347,7 @@ export class DisplayTracker {
       const j = this.confirm(t, strict, c, c.relockFrames, fast ? 0 : c.implausibleSec, 'jump');
       return { ...j, pred: p, near, from: j.value != null ? strictR : undefined };
     }
-    if (this.willRescue(t, near, p, c)) {
+    if (near && near.v !== veto && this.willRescue(t, near, p, c)) {
       this.accept(t, near.v, c);
       return { value: near.v, how: 'prior', pred: p, near, from: nearR };
     }

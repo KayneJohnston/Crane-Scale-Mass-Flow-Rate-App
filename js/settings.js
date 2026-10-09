@@ -23,6 +23,8 @@ export const DEFAULTS = {
   temporal: true,
   relockFrames: 3,
   collectCrops: true,
+  askMode: 'always',
+  askAfterSec: 3,
   // automatic start / stop
   autoStart: true,
   autoStop: true,
@@ -85,8 +87,19 @@ export const SCHEMA = [
       { key: 'videoFps', label: 'Video analysis frames per second', type: 'number', min: 2, max: 30, step: 1 },
       { key: 'temporal', label: 'Check each reading against the previous ones', type: 'checkbox', help: 'A reading far from the last few (e.g. 20050 then 10050) is only believed once it repeats; unclear frames are resolved using the expected value.' },
       { key: 'relockFrames', label: 'Frames needed to believe a sudden jump', type: 'number', min: 1, max: 10, step: 1 },
+    ],
+  },
+  {
+    group: 'When a reading is unclear',
+    items: [
+      {
+        key: 'askMode', label: 'Ask me what the display shows', type: 'select',
+        options: [['always', 'Whenever the camera is reading'], ['tap', 'Only during a tap'], ['never', 'Never']],
+      },
+      { key: 'askAfterSec', label: 'Ask after it has been unclear for', unit: 's', type: 'number', min: 1, max: 60, step: 1 },
       { key: 'collectCrops', label: 'Keep hard-to-read frames for review', type: 'checkbox', help: 'Pictures of the display from frames the app could not read or had to guess (at most one every 3 s and 20 every 10 minutes, 200 in all) stay on this phone for you to label in Review, and to export.' },
     ],
+    help: 'A question closes by itself after 12 s. After “Not now” or “Can’t tell” the app waits a minute; if questions go unanswered it waits longer each time, up to 5 minutes. Your answers count as readings, and their pictures go to Review already labelled. The ✎ next to the reading on the live screen corrects it any time.',
   },
   {
     group: 'Automatic start / stop',

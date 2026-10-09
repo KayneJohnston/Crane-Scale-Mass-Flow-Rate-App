@@ -57,13 +57,14 @@ const check = (cond, msg) => { console.log(`${cond ? 'PASS' : 'FAIL'} ${msg}`); 
 await page.goto(base);
 await page.click('#btnCamera');
 await page.waitForTimeout(26000);
+await page.click('#btnPower');
+await page.waitForTimeout(1000); // (a picture taken just before may still be being saved)
 const kept = await page.evaluate(async () => (await window.__tapRate.crops.list()).map((c) => ({ kind: c.kind, w: c.w, h: c.h })));
 const kinds = [...new Set(kept.map((c) => c.kind))];
 console.log(`   kept ${kept.length} crops: ${kinds.join(', ')}`);
 check(kept.length >= 3 && kinds.includes('sample') && kinds.some((k) => k !== 'sample'), 'hard frames and a clear sample kept');
 const badge = await page.textContent('#reviewBadge');
 check(+badge === kept.length, `the Review tab counts them (${badge})`);
-await page.click('#btnPower');
 
 await page.click('.tab[data-view="review"]');
 await page.waitForFunction(() => document.getElementById('reviewImg').naturalWidth > 0, null, { timeout: 10000 });
