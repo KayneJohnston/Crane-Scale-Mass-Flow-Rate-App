@@ -427,8 +427,13 @@ export class GitHubSink {
     return data;
   }
 
-  /** May the files go there? {full, branch} - throws with what is wrong (a public repository too). */
-  async check() {
+  /**
+   * May the files go there? {full, branch} - throws with what is wrong (a public
+   * repository too). write: also write something, as the token, to be sure it may (the
+   * repository only tells what its owner may): a blob no commit refers to, or in an
+   * empty repository its first commit, a README, which it needs anyway.
+   */
+  async check({ write = false } = {}) {
     if (!this.r) throw new Error('Type the repository as owner/name.');
     if (!this.token) throw new Error('Paste the access token.');
     let d;
@@ -436,7 +441,18 @@ export class GitHubSink {
     if (!d.private) throw Object.assign(new Error(`${d.full_name} is public: anyone could see the pictures. Make it private, or use another one.`), { public: true });
     if (d.permissions && !d.permissions.push) throw new Error(`The token may not write to ${d.full_name}: give it “Contents: Read and write” for it.`);
     this.info = { full: d.full_name, branch: d.default_branch || 'main' };
+    if (write) {
+      try {
+        if (!(await this.head(this.info.branch))) await this.init();
+        else await this.req('POST', '/git/blobs', { content: toBase64(new TextEncoder().encode('Tap Rate: may this token write here?')), encoding: 'base64' });
+      } catch (e) { throw e.status !== undefined ? explain(e) : e; }
+    }
     return this.info;
+  }
+
+  // a repository without any commit takes no blobs: its first file goes in on its own
+  async init() {
+    await this.req('PUT', '/contents/README.md', { message: 'Tap Rate teach data', content: toBase64(new TextEncoder().encode(README)) });
   }
 
   async head(branch) {
@@ -452,8 +468,7 @@ export class GitHubSink {
     try {
       let head = await this.head(info.branch);
       if (!head) {
-        // a repository without any commit takes no blobs: its first file goes in on its own
-        await this.req('PUT', '/contents/README.md', { message: 'Tap Rate teach data', content: toBase64(new TextEncoder().encode(README)) });
+        await this.init();
         head = await this.head(info.branch);
       }
       const blob = await this.req('POST', '/git/blobs', { content: toBase64(bytes), encoding: 'base64' });

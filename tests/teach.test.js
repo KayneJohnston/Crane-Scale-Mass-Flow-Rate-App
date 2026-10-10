@@ -150,7 +150,7 @@ test('repository names and base64', () => {
 });
 
 // a fake GitHub: one repository, its branch and objects; records every request
-function fakeGitHub({ isPrivate = true, empty = false, push = true, token = 'tok', raceOnce = false } = {}) {
+function fakeGitHub({ isPrivate = true, empty = false, push = true, token = 'tok', raceOnce = false, write = true } = {}) {
   const st = { calls: [], blobs: new Map(), trees: new Map(), commits: new Map(), head: null, n: 0 };
   const id = (p) => `${p}${++st.n}`;
   if (!empty) { st.trees.set('t0', { base: null, entries: [] }); st.commits.set('c0', { tree: 't0', parents: [] }); st.head = 'c0'; }
@@ -161,6 +161,7 @@ function fakeGitHub({ isPrivate = true, empty = false, push = true, token = 'tok
     const body = opt.body ? JSON.parse(opt.body) : null;
     st.calls.push(`${opt.method} ${path}`);
     if (opt.headers.Authorization !== `Bearer ${token}`) return json(401, { message: 'Bad credentials' });
+    if (!write && opt.method !== 'GET') return json(403, { message: 'Resource not accessible by personal access token' });
     if (opt.method === 'GET' && path === '') return json(200, { full_name: 'kayne/teach', private: isPrivate, default_branch: 'main', permissions: { push } });
     if (opt.method === 'GET' && path === '/git/ref/heads/main') return st.head ? json(200, { object: { sha: st.head } }) : json(409, { message: 'Git Repository is empty.' });
     if (opt.method === 'PUT' && path === '/contents/README.md') {
@@ -219,6 +220,19 @@ test('an empty repository gets its first commit first; a commit made meanwhile i
   assert.equal(R.st.head, sha);
   assert.equal(R.st.calls.filter((c) => c === 'PATCH /git/refs/heads/main').length, 2, 'tried again on the new head');
   assert.equal(R.st.calls.filter((c) => c === 'POST /git/blobs').length, 1, 'the file is sent once');
+});
+
+test('checking with a write: a blob nothing refers to, or the README an empty repository needs', async () => {
+  const G = fakeGitHub();
+  await new GitHubSink({ repo: 'kayne/teach', token: 'tok', fetch: G.fetch }).check({ write: true });
+  assert.ok(G.st.calls.includes('POST /git/blobs'));
+  assert.equal(G.st.head, 'c0', 'no commit');
+  const E = fakeGitHub({ empty: true });
+  await new GitHubSink({ repo: 'kayne/teach', token: 'tok', fetch: E.fetch }).check({ write: true });
+  assert.ok(E.st.calls.includes('PUT /contents/README.md') && E.st.head, 'an empty repository gets its README');
+  // a token that may read but not write: the repository says its owner may push
+  await assert.rejects(new GitHubSink({ repo: 'kayne/teach', token: 'tok', fetch: fakeGitHub({ write: false }).fetch }).check({ write: true }), /may not write.*Contents: Read and write/);
+  await new GitHubSink({ repo: 'kayne/teach', token: 'tok', fetch: fakeGitHub({ write: false }).fetch }).check(); // (without: not found out)
 });
 
 test('refused: a public repository, a token that may not write, a wrong token, no connection', async () => {

@@ -17,7 +17,7 @@ import { AskPolicy, ASK_DEFAULTS, askChoices, digitParts } from './ask.js';
 import { DigitMemory, lessonsOf } from './vision/learn.js';
 import { TeachPolicy, TeachStore, TEACH_DEFAULTS, teachRect, viewPicture, readingOf, nextBatch, staleRecords, batchFiles, batchPath, batchSummary, teachUsage, teachToDrop, GitHubSink, parseRepo } from './teach.js';
 
-export const VERSION = '0.7.0';
+export const VERSION = '0.7.1';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -1144,8 +1144,8 @@ async function saveGitHubSetup() {
   renderGitHubSetup();
   st.textContent = 'Checking…';
   try {
-    const info = await new GitHubSink({ repo: r.full, token }).check();
-    st.textContent = `✓ ${info.full} is private and the token may write to it. Teach data goes there ${settings.teachAuto !== false ? 'when the camera is off' : 'when you tap Send now (Review)'}.`;
+    const info = await new GitHubSink({ repo: r.full, token }).check({ write: true });
+    st.textContent = `✓ ${info.full} is private and the token wrote to it. Teach data goes there ${settings.teachAuto !== false ? 'when the camera is off' : 'when you tap Send now (Review)'}${settings.teachMode ? '' : ', once teach mode is on (above)'}.`;
   } catch (e) { st.textContent = `✗ ${e.message}`; }
 }
 
