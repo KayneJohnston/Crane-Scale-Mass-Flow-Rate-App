@@ -11,9 +11,9 @@
 //
 // The reader uses a look only for a glyph closer to it than to the shape of every other
 // digit (sevenseg.js): there the digit fits better in the costs the constrained decoding
-// and the probabilities use (pipeline.js, posterior.js), and reading another digit is
-// doubtful, so the frame is not read on its own. A look never makes a reading clear by
-// itself, and one mistaken answer teaches nothing.
+// and the probabilities use (pipeline.js, posterior.js). Reading another digit where a
+// look is closer, or nearly as close, is doubtful, so the frame is not read on its own.
+// A look never makes a reading clear by itself, and one mistaken answer teaches nothing.
 
 export const LEARN_DEFAULTS = {
   poolL1: 0.6,       // measurements this close (summed over the 7 segments) are one look

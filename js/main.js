@@ -15,8 +15,9 @@ import { CropStore, CropPolicy, CROP_DEFAULTS, cropRect, cropRecord, choicesFor,
 import { makeZip } from './zip.js';
 import { AskPolicy, ASK_DEFAULTS, askChoices, digitParts } from './ask.js';
 import { DigitMemory, lessonsOf } from './vision/learn.js';
+import { TeachPolicy, TeachStore, TEACH_DEFAULTS, teachRect, viewPicture, readingOf, nextBatch, staleRecords, batchFiles, batchPath, batchSummary, teachUsage, teachToDrop, GitHubSink, parseRepo } from './teach.js';
 
-export const VERSION = '0.6.0';
+export const VERSION = '0.7.0';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -34,6 +35,8 @@ const cropPolicy = new CropPolicy();
 const askPolicy = new AskPolicy();
 const LEARN_KEY = 'tapRate.learned.v1'; // what the reader learned from the person (learn.js)
 const memory = loadMemory();
+const teachStore = new TeachStore();
+const GH_KEY = 'tapRate.github.v1'; // where teach data goes: {repo, token}, apart from the settings
 
 const app = {
   source: null,               // null | 'camera' | 'video' | 'demo'
@@ -214,6 +217,7 @@ async function startCamera() {
     reader.resetTracking();
     cropPolicy.reset();
     askPolicy.reset();
+    teachStart();
     $('camStart').hidden = true;
     wake.request();
     app.hwZoom = 1;
@@ -267,8 +271,10 @@ async function stopSources({ keepUi = false } = {}) {
   camera.stop();
   if (video.src) { URL.revokeObjectURL(video.src); video.removeAttribute('src'); video.load(); }
   closeAsk();
+  const wasCamera = app.source === 'camera';
   app.demo = null; app.vid = null; app.source = null; app.engine = null; app.lastRes = null;
   syncCorrectButton();
+  if (wasCamera) teachStop();
   app.okSince = app.failSince = null;
   camBox.classList.remove('dim');
   wake.release();
@@ -467,6 +473,7 @@ function processFrame(el, w, h, T, wall) {
   const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug, expect, learned: learnedLooks() }, T);
   app.lastRes = res;
   collectCrop(res, el, w, h, T, wall);
+  if (app.source === 'camera' && settings.teachMode) teachFrame(res, el, w, h, T, wall, view);
   if (app.source === 'camera') considerAsk(res, T);
   if (res.located) app.foundAt = performance.now();
   app.engine.pushFrame(T, wall, res.ok ? res.value : null, res.conf, res.how);
@@ -613,6 +620,7 @@ async function renderReview() {
   await showCrop(cur);
   renderReviewStats(list);
   await renderReviewGrid(list);
+  renderTeach();
   $('reviewStats').hidden = !list.length && !memory.stats().looks;
   $('reviewFoot').hidden = !list.length && !memory.stats().looks;
   $('btnCropClear').hidden = !list.length;
@@ -674,6 +682,7 @@ async function labelCrop(c, label) {
   memory.unlearn(c.learnt);
   c.learnt = typeof label === 'number' ? learnFrom(c, label) : null;
   saveMemory();
+  c.sentAt = null; // (sent again with the teach data)
   await crops.update(c);
   review.skipped.delete(c.id);
   await renderReview();
@@ -830,6 +839,322 @@ function forgetLearned() {
   toast('Forgotten');
 }
 
+// ------------------------------------------------- teach mode (teach.js) --
+
+// Pictures and clips of the display while the camera reads, with what the app read
+// and what the person said, kept on the phone and sent to the GitHub repository the
+// person set up, while the camera is off. Off unless switched on in Settings.
+const teach = {
+  policy: new TeachPolicy(),
+  session: '', n: 0,      // ids of this camera start
+  saved: 0,               // pictures kept since the camera started (on the live screen)
+  bytes: 0,               // kept on the phone, not sent yet
+  inFlight: 0,            // pictures being encoded
+  seen: null,             // where the display was last seen: {box, T}
+  clip: null,             // the clip under way: {key, rect}
+  log: null,              // the readings of the last half-minute: {wall0, rows}
+  day: null,              // saved today: {day, bytes}
+  sending: false, status: '', dot: '',
+};
+
+function deviceId() {
+  try {
+    let d = localStorage.getItem('tapRate.device');
+    if (!d) { d = Math.random().toString(16).slice(2, 8); localStorage.setItem('tapRate.device', d); }
+    return d;
+  } catch { return 'phone'; }
+}
+
+function ghConfig() {
+  try { return JSON.parse(localStorage.getItem(GH_KEY) || 'null') || {}; } catch { return {}; }
+}
+
+// bytes saved today (add: just saved)
+function teachDay(add = 0) {
+  const day = new Date().toDateString();
+  if (!teach.day) { try { teach.day = JSON.parse(localStorage.getItem('tapRate.teachDay') || 'null'); } catch { /* none */ } }
+  if (!teach.day || teach.day.day !== day) teach.day = { day, bytes: 0 };
+  if (add) {
+    teach.day.bytes += add;
+    try { localStorage.setItem('tapRate.teachDay', JSON.stringify(teach.day)); } catch { /* full */ }
+  }
+  return teach.day.bytes;
+}
+
+function teachStart() {
+  teach.policy.reset();
+  teach.session = Date.now().toString(36);
+  teach.n = 0; teach.saved = 0; teach.seen = null; teach.clip = null; teach.log = null;
+  renderTeachDot();
+}
+
+function teachStop() {
+  flushTeachLog();
+  teach.clip = null;
+  renderTeachDot();
+  teachTidy();
+  if (settings.teachAuto !== false) setTimeout(() => teachSend(), 3000);
+}
+
+// readings and answers no picture needs any more (none was kept near them)
+async function teachTidy() {
+  try {
+    const recs = await teachStore.list();
+    const stale = new Set(staleRecords(recs, []));
+    if (stale.size) await teachStore.delete(recs.filter((r) => stale.has(r.id)));
+  } catch (e) { console.warn(e); }
+}
+
+// the readings of every frame, kept half a minute at a time: [wall ms, kg or null, confidence, how]
+function logReading(res, wall) {
+  const L = (teach.log ||= { wall0: wall, rows: [] });
+  L.rows.push([wall, res.ok ? res.value : null, Math.round((res.conf || 0) * 100) / 100, res.how ?? null]);
+  if (wall - L.wall0 >= 30000) flushTeachLog();
+}
+
+function flushTeachLog() {
+  const L = teach.log;
+  teach.log = null;
+  if (!L?.rows.length) return;
+  teachStore.add({ type: 'log', id: `${teach.session}-L${L.wall0.toString(36)}`, wall0: L.wall0, wall1: L.rows.at(-1)[0], rows: L.rows }).catch((e) => console.warn(e));
+}
+
+// what the person said the display showed (taken back with Undo)
+function teachAnswer(T, wall, value, corrected, kind) {
+  if (!settings.teachMode || app.source !== 'camera') return null;
+  const rec = { type: 'answer', id: `${teach.session}-A${wall.toString(36)}`, wall, t: +T.toFixed(3), value, corrected, kind };
+  teachStore.add(rec).catch(() => {});
+  return rec;
+}
+
+function teachFrame(res, el, w, h, T, wall, view) {
+  if (settings.teachWhen === 'tap' && !app.engine?.sess) { flushTeachLog(); renderTeachDot(); return; }
+  logReading(res, wall);
+  if (res.located && !res.located.edge) teach.seen = { box: res.located, T };
+  const d = teach.policy.frame(res, T, { budget: teachDay() < TEACH_DEFAULTS.dayMB * 1e6, clips: settings.teachClips !== false });
+  // a clip is one place in the camera frame: where the display was when it started
+  if (d.clip?.i === 0) {
+    const box = teach.seen && T - teach.seen.T <= 2 ? teach.seen.box : null;
+    teach.clip = box ? { key: `${teach.session}-k${d.clip.n}`, rect: teachRect(box, w, h, TEACH_DEFAULTS, view) } : null;
+  }
+  if (!d.clip) teach.clip = null;
+  const clip = d.clip && teach.clip?.rect ? teach.clip : null;
+  if ((d.still || clip) && teach.inFlight < TEACH_DEFAULTS.maxInFlight) {
+    const pics = {};
+    const rect = clip ? clip.rect : teach.seen && T - teach.seen.T <= 2 ? teachRect(teach.seen.box, w, h, TEACH_DEFAULTS, view) : null;
+    if (rect) pics.display = grab(el, rect);
+    const vp = d.still ? viewPicture(view) : null;
+    if (vp) pics.view = grab(el, vp);
+    if (Object.keys(pics).length) {
+      const sess = app.engine?.sess;
+      saveTeach({
+        type: 'sample', id: `${teach.session}-${(++teach.n).toString(36)}`, kind: d.still || 'clip',
+        clip: clip ? clip.key : null, i: clip ? d.clip.i : null, why: clip ? d.clip.why : null,
+        t: +T.toFixed(3), wall, tap: sess ? { id: sess.id, t: +(T - sess.T0).toFixed(3) } : null,
+        src: { w, h, lens: camera.track?.label || null }, zoom: +app.zoomTotal.toFixed(2), view: vp, rect,
+        light: d.still ? { view: luma(pics.view), display: pics.display ? luma(pics.display) : null } : null,
+        reading: readingOf(res), files: [], bytes: 0,
+      }, pics);
+      if (d.still) teach.saved++;
+    }
+  }
+  renderTeachDot();
+}
+
+// a part of the camera frame, as a canvas of r.outW x r.outH
+function grab(el, r) {
+  const cv = document.createElement('canvas');
+  cv.width = r.outW; cv.height = r.outH;
+  const ctx = cv.getContext('2d');
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(el, r.x, r.y, r.w, r.h, 0, 0, r.outW, r.outH);
+  return cv;
+}
+
+// how bright a picture is: mean and 99th percentile of the luma, 0-255 (from a small copy)
+function luma(cv) {
+  const w = 48, h = Math.max(1, Math.round((48 * cv.height) / cv.width));
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const x = c.getContext('2d', { willReadFrequently: true });
+  x.drawImage(cv, 0, 0, w, h);
+  const d = x.getImageData(0, 0, w, h).data;
+  const ys = [];
+  for (let i = 0; i < d.length; i += 4) ys.push(0.299 * d[i] + 0.587 * d[i + 1] + 0.114 * d[i + 2]);
+  ys.sort((a, b) => a - b);
+  return { mean: Math.round(ys.reduce((a, b) => a + b, 0) / ys.length), peak: Math.round(ys[Math.floor(0.99 * (ys.length - 1))]) };
+}
+
+async function saveTeach(rec, pics) {
+  teach.inFlight++;
+  try {
+    const files = {};
+    for (const [name, cv] of Object.entries(pics)) {
+      const blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', name === 'view' ? 0.85 : 0.92));
+      if (blob) files[name] = await blobBytes(blob);
+    }
+    rec.files = Object.keys(files);
+    rec.bytes = Object.values(files).reduce((a, b) => a + b.byteLength, 0);
+    if (!rec.files.length) return;
+    await teachStore.add(rec, files);
+    teachDay(rec.bytes);
+    teach.bytes += rec.bytes;
+    if (teach.bytes > TEACH_DEFAULTS.keepMB * 1e6) {
+      const recs = await teachStore.list();
+      const drop = new Set(teachToDrop(recs, 0.9 * TEACH_DEFAULTS.keepMB * 1e6));
+      await teachStore.delete(recs.filter((r) => drop.has(r.id)));
+      teach.bytes = teachUsage(await teachStore.list()).bytes;
+    }
+  } catch (e) {
+    console.warn('teach picture not kept', e);
+    teach.status = `Pictures not kept: ${e?.name === 'QuotaExceededError' ? 'the phone’s storage for the app is full' : e?.message || e}`;
+  } finally { teach.inFlight--; }
+}
+
+function renderTeachDot() {
+  const on = !!settings.teachMode && app.source === 'camera';
+  const txt = !on ? '' : teach.clip ? 'Clip' : `Teach ${teach.saved}`;
+  if (txt === teach.dot) return;
+  teach.dot = txt;
+  $('teachDot').hidden = !on;
+  $('teachDot').classList.toggle('rec', !!teach.clip);
+  $('teachDotText').textContent = txt;
+}
+
+// what the batches say about the app (the camera is described with each picture)
+function teachAbout() {
+  return {
+    version: VERSION, device: deviceId(),
+    display: { minKg: +settings.minKg, maxKg: +settings.maxKg, stepKg: +settings.stepKg, multiplier: +settings.multiplier },
+    reader: { colorMode: settings.colorMode, strictness: +settings.strictness, resolution: settings.resolution, lowPower: !!settings.lowPower, learned: memory.stats() },
+  };
+}
+
+// 0.3 MB, 12 MB
+const mb = (bytes) => `${bytes < 10e6 ? (bytes / 1e6).toFixed(1) : Math.round(bytes / 1e6)} MB`;
+
+const ymd = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+const hms = (d) => [d.getHours(), d.getMinutes(), d.getSeconds()].map((x) => String(x).padStart(2, '0')).join('');
+
+// labelled Review pictures not sent yet go to review/ in the same repository
+async function sendReviewLabels(sink) {
+  const todo = (await crops.list()).filter((c) => c.label != null && !c.sentAt);
+  if (!todo.length) return 0;
+  const images = new Map();
+  for (const c of todo) { const b = await crops.image(c.id); if (b) images.set(c.id, new Uint8Array(b)); }
+  const d = new Date();
+  await sink.put(`review/${ymd(d)}/${hms(d)}_${deviceId()}.zip`, makeZip(exportFiles(todo, images, { ...teachAbout(), learned: memory.toJSON() })), `Review labels: ${todo.length} picture${todo.length === 1 ? '' : 's'}`);
+  for (const c of todo) { c.sentAt = Date.now(); await crops.update(c); }
+  return todo.length;
+}
+
+// Send what is kept, a zip at a time, while the camera is off (manual: "Send now")
+async function teachSend({ manual = false } = {}) {
+  if (teach.sending) return;
+  if (app.source === 'camera') { if (manual) toast('Teach data is sent while the camera is off'); return; }
+  const gh = ghConfig();
+  if (!gh.repo || !gh.token) { if (manual) toast('Set up where to send it: Settings › Teach mode', 5000); return; }
+  flushTeachLog();
+  const waiting = (await teachStore.list()).some((r) => r.type === 'sample') || (await crops.list()).some((c) => c.label != null && !c.sentAt);
+  if (!waiting) { if (manual) toast('Nothing new to send'); return; }
+  teach.sending = true;
+  teach.status = 'Sending…';
+  renderTeach();
+  let zips = 0, bytes = 0;
+  try {
+    const sink = new GitHubSink(gh);
+    await sink.check();
+    while (app.source !== 'camera') { // (the camera started meanwhile: the rest later)
+      const recs = await teachStore.list();
+      const b = nextBatch(recs, TEACH_DEFAULTS.batchMB * 1e6);
+      if (!b) break;
+      const zip = makeZip(batchFiles(b, await teachStore.files(b.samples), teachAbout()));
+      await sink.put(batchPath(b, deviceId()), zip, `Teach data: ${batchSummary(b)}`);
+      const stale = new Set(staleRecords(recs, b.samples.map((x) => x.id)));
+      await teachStore.delete([...b.samples, ...recs.filter((r) => stale.has(r.id))]);
+      zips++; bytes += b.bytes;
+      teach.status = `Sending… ${zips} sent (${mb(bytes)})`;
+      renderTeach();
+    }
+    const labels = await sendReviewLabels(sink);
+    const what = [zips ? `${zips} zip${zips === 1 ? '' : 's'} of pictures (${mb(bytes)})` : '', labels ? `${labels} Review label${labels === 1 ? '' : 's'}` : ''].filter(Boolean).join(' and ');
+    teach.status = `Sent ${what || 'nothing new'} to ${sink.info.full} at ${new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`;
+    if (manual) toast(teach.status, 4000);
+  } catch (e) {
+    teach.status = `Not sent: ${e.message}`;
+    if (manual) toast(teach.status, 6000);
+  } finally {
+    teach.sending = false;
+    teach.bytes = teachUsage(await teachStore.list()).bytes;
+    renderTeach();
+  }
+}
+
+async function teachShare() {
+  flushTeachLog();
+  const b = nextBatch(await teachStore.list(), Infinity);
+  if (!b) { toast('No teach data on the phone'); return; }
+  toast('Preparing the pictures…');
+  const zip = makeZip(batchFiles(b, await teachStore.files(b.samples), teachAbout()));
+  await shareOrDownload(`tap-rate-teach-${datestamp()}.zip`, zip, 'application/zip');
+}
+
+async function teachDelete() {
+  const recs = await teachStore.list();
+  const u = teachUsage(recs);
+  if (!recs.length) { toast('No teach data on the phone'); return; }
+  if (!confirm(`Delete the teach data on this phone (${u.pictures} pictures, ${u.clips} clips, ${mb(u.bytes)})? What was sent stays in the repository.`)) return;
+  await teachStore.delete(recs);
+  teach.bytes = 0;
+  renderTeach();
+  toast('Deleted');
+}
+
+async function renderTeach() {
+  const recs = await teachStore.list();
+  const u = teachUsage(recs);
+  const gh = ghConfig();
+  const card = $('teachCard');
+  card.hidden = !settings.teachMode && !u.bytes && !teach.status;
+  if (card.hidden) return;
+  const lines = [];
+  lines.push(u.bytes ? `On this phone, not sent yet: ${u.pictures} picture${u.pictures === 1 ? '' : 's'}, ${u.clips} clip${u.clips === 1 ? '' : 's'} (${mb(u.bytes)})` : 'Nothing waiting to be sent.');
+  lines.push(`Saved today: ${mb(teachDay())} of ${TEACH_DEFAULTS.dayMB} MB${settings.teachMode ? '' : ' · teach mode is off'}`);
+  lines.push(gh.repo && gh.token ? `Goes to ${gh.repo} ${settings.teachAuto !== false ? 'when the camera is off' : 'when you tap Send now'}` : 'Not sent anywhere yet: set up a private GitHub repository in Settings › Teach mode, or share it as a .zip.');
+  if (teach.status) lines.push(teach.status);
+  $('teachStats').textContent = lines.join('\n');
+  $('btnTeachSend').disabled = teach.sending;
+}
+
+function renderGitHubSetup() {
+  const gh = ghConfig();
+  $('ghRepo').value = gh.repo || '';
+  $('ghToken').value = '';
+  $('ghToken').placeholder = gh.token ? 'saved · paste a new one to change it' : 'github_pat_…';
+}
+
+async function saveGitHubSetup() {
+  const old = ghConfig();
+  const r = parseRepo($('ghRepo').value);
+  const token = $('ghToken').value.trim() || old.token || '';
+  const st = $('ghStatus');
+  if (!r) { st.textContent = 'Type the repository as owner/name.'; return; }
+  try { localStorage.setItem(GH_KEY, JSON.stringify({ repo: r.full, token })); } catch { /* full */ }
+  renderGitHubSetup();
+  st.textContent = 'Checking…';
+  try {
+    const info = await new GitHubSink({ repo: r.full, token }).check();
+    st.textContent = `✓ ${info.full} is private and the token may write to it. Teach data goes there ${settings.teachAuto !== false ? 'when the camera is off' : 'when you tap Send now (Review)'}.`;
+  } catch (e) { st.textContent = `✗ ${e.message}`; }
+}
+
+function forgetGitHubSetup() {
+  try { localStorage.removeItem(GH_KEY); } catch { /* none */ }
+  renderGitHubSetup();
+  $('ghStatus').textContent = 'Removed from this phone.';
+}
+
 // ------------------------------------- asking what the display shows --
 
 // The question card (ask.js). open: {kind: 'ask' (the reader can't tell) | 'correct' (the
@@ -953,6 +1278,7 @@ function answerAsk(v) {
   // ... and learns what the digits it was not sure of (or got wrong) look like
   q.learnt = learnFrom(res, v);
   saveMemory();
+  q.teachAnswer = teachAnswer(T, wall, v, corrected, q.kind);
   app.engine?.pushFrame(T, wall, v, 1, 'told');
   askPolicy.answered(T);
   q.cropId = null; q.undone = false;
@@ -978,6 +1304,8 @@ function undoAnswer() {
   memory.unlearn(q.learnt);
   q.learnt = null;
   saveMemory();
+  if (q.teachAnswer) teachStore.delete(q.teachAnswer).catch(() => {});
+  q.teachAnswer = null;
   q.undone = true;
   if (q.cropId) crops.delete(q.cropId).then(() => { review.count.total--; updateReviewBadge(); }).catch(() => {});
   q.cropId = null;
@@ -1622,7 +1950,8 @@ function renderSettings() {
     if (g.help) { const p = document.createElement('p'); p.className = 'help'; p.textContent = g.help; sec.appendChild(p); }
     box.appendChild(sec);
   }
-  $('aboutText').textContent = `Tap Rate v${VERSION}. Reads the crane-scale display with the camera, filters it robustly and shows the tap rate against target. All data stays on this phone until you export it.`;
+  renderGitHubSetup();
+  $('aboutText').textContent = `Tap Rate v${VERSION}. Reads the crane-scale display with the camera, filters it robustly and shows the tap rate against target. All data stays on this phone until you export it, or teach mode sends its pictures to your own GitHub repository.`;
 }
 
 function applySettings(key) {
@@ -1632,6 +1961,10 @@ function applySettings(key) {
   if (key === 'lowPower' || key === 'all') syncPower();
   if (key === 'hwZoom') setZoom(app.zoomTotal);
   if (key === 'debug') $('debugPanel').hidden = !settings.debug;
+  if (key === 'teachMode') {
+    if (settings.teachMode) { navigator.storage?.persist?.().catch(() => {}); teachStart(); }
+    renderTeachDot();
+  }
   renderLive(true);
 }
 
@@ -1782,6 +2115,11 @@ function wire() {
   $('btnCropTest').addEventListener('click', () => testReaderOnCrops());
   $('btnCropClear').addEventListener('click', () => clearCrops());
   $('btnForgetLearned').addEventListener('click', () => forgetLearned());
+  $('btnTeachSend').addEventListener('click', () => teachSend({ manual: true }));
+  $('btnTeachShare').addEventListener('click', () => teachShare().catch((e) => toast(`Export failed: ${e.message}`)));
+  $('btnTeachDelete').addEventListener('click', () => teachDelete());
+  $('btnGhSave').addEventListener('click', () => saveGitHubSetup());
+  $('btnGhForget').addEventListener('click', () => forgetGitHubSetup());
   // settings tools
   $('selCamera').addEventListener('change', (e) => { settings.deviceId = e.target.value; saveSettings(settings); restartCamera(); });
   $('fileVideo').addEventListener('change', (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) loadVideo(f); });
@@ -1799,8 +2137,9 @@ function wire() {
     location.reload();
   });
   document.addEventListener('visibilitychange', async () => {
-    if (document.visibilityState !== 'visible') { saveActive(); return; }
+    if (document.visibilityState !== 'visible') { saveActive(); flushTeachLog(); return; }
     wake.refresh();
+    if (!app.source && settings.teachAuto !== false) teachSend();
     if (app.source === 'camera' && !camera.active) {
       const P = powerProfile(settings);
       try { await camera.start({ deviceId: settings.deviceId, resolution: P.resolution, fps: P.camFps }); app.hwZoom = 1; setZoom(app.zoomTotal); } catch { toast('Tap “Start camera” to resume'); }
@@ -1825,6 +2164,12 @@ async function init() {
   await store.open();
   await recoverInterrupted();
   crops.open().then(async () => { countCrops(await crops.list()); updateReviewBadge(); }).catch((e) => console.warn(e));
+  teachStore.open().then(async () => {
+    teach.bytes = teachUsage(await teachStore.list()).bytes;
+    teachTidy();
+    if (settings.teachAuto !== false) setTimeout(() => teachSend(), 5000);
+  }).catch((e) => console.warn(e));
+  setInterval(() => { if (!app.source && settings.teachAuto !== false && document.visibilityState === 'visible') teachSend(); }, 5 * 60e3);
   wire();
   setupGestures();
   renderSettings();
@@ -1836,7 +2181,7 @@ async function init() {
   }
   const p = new URLSearchParams(location.search);
   if (p.has('demo')) startDemo(+p.get('demo') || 5, +p.get('seed') || 0);
-  window.__tapRate = { app, settings: () => settings, store, crops, memory }; // for debugging / automated tests
+  window.__tapRate = { app, settings: () => settings, store, crops, memory, teachStore, teach }; // for debugging / automated tests
 }
 
 init();

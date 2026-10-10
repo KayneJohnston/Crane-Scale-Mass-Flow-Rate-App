@@ -25,7 +25,7 @@
 // (default 0.6), so they look like 9s. The person says twice that it shows 18,550; then
 // 60 s of the weight rising 50 kg every 3 s from 18,400 are read with the history, with
 // and without what was learned.
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync, readdirSync, existsSync } from 'node:fs';
 import { decodePNG } from './png.js';
 import { makeSampler } from '../js/vision/sampler.js';
 import { readFrame } from '../js/vision/pipeline.js';
@@ -116,9 +116,11 @@ if (cmd === 'video') {
   const [dir, truthFile] = rest;
   const truth = JSON.parse(readFileSync(truthFile, 'utf8'));
   const files = readdirSync(dir).filter((f) => /^f\d+\.png$/.test(f)).sort();
+  // (the frames' times: times.json, as tools/teach-import.mjs writes for a clip, else 10 a second)
+  const times = existsSync(`${dir}/times.json`) ? JSON.parse(readFileSync(`${dir}/times.json`, 'utf8')) : null;
   // (decoded when used: a minute of full-size video frames does not fit in memory at once)
   const frames = files.map((f, i) => ({
-    t: i / 10, truth: truth[+f.slice(1, -4)],
+    t: times ? times[+f.slice(1, -4)] : i / 10, truth: truth[+f.slice(1, -4)],
     load: () => { const { width: W, height: H, data } = decodePNG(readFileSync(`${dir}/${f}`)); return { sample: makeSampler(data, W, H), W, H }; },
   })).filter((f) => f.truth);
   evaluate(frames, dir.split('/').pop());

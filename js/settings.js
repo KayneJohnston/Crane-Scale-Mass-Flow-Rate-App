@@ -24,6 +24,11 @@ export const DEFAULTS = {
   relockFrames: 3,
   collectCrops: true,
   learnLooks: true,
+  // teach mode (teach.js)
+  teachMode: false,
+  teachWhen: 'camera',
+  teachClips: true,
+  teachAuto: true,
   askMode: 'always',
   askAfterSec: 3,
   // automatic start / stop
@@ -127,6 +132,19 @@ export const SCHEMA = [
       { key: 'beepRepeatSec', label: 'Repeat beep every', unit: 's', type: 'number', min: 5, max: 300, step: 5 },
       { key: 'saveDemo', label: 'Save demo runs in History', type: 'checkbox' },
     ],
+  },
+  {
+    group: 'Teach mode',
+    items: [
+      { key: 'teachMode', label: 'Teach mode: keep pictures of the display', type: 'checkbox', help: 'While the camera reads: a picture of the camera box every 20 s, of the frames it can’t read or isn’t sure of every 5 s, and 6 s clips of the display (every frame) when it can’t read it and every 5 minutes, each with what the app read and what you told it. They show the reader your display from other angles and in other light, so it can be tested and improved on them. At most 150 MB a day; up to 400 MB is kept on this phone until sent. “● Teach” on the camera picture shows it is on.' },
+      {
+        key: 'teachWhen', label: 'Keep pictures', type: 'select',
+        options: [['camera', 'Whenever the camera is reading'], ['tap', 'Only during taps']],
+      },
+      { key: 'teachClips', label: 'Short clips too', type: 'checkbox' },
+      { key: 'teachAuto', label: 'Send automatically when the camera is off', type: 'checkbox', help: 'To the private GitHub repository below, a zip of about 12 MB at a time, together with your Review labels. iPhones don’t let web apps send in the background, so it is sent while the app is open and not filming (on mobile data too if there is no Wi-Fi: switch this off and use Review › Send now instead).' },
+    ],
+    help: 'Anything else in the camera box (people too) may be in the pictures. Only the camera box is kept, never the whole camera picture.',
   },
 ];
 

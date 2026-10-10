@@ -2,11 +2,11 @@
 // Network-first (so updates arrive straight away when there is signal), with
 // the cached copy used when offline or when the network is slow.
 
-const CACHE = 'tap-rate-v0.6.0';
+const CACHE = 'tap-rate-v0.7.0';
 const SHELL = [
   './', 'index.html', 'manifest.webmanifest', 'css/app.css',
   'js/main.js', 'js/settings.js', 'js/store.js', 'js/export.js', 'js/audio.js', 'js/camera.js', 'js/reader.js',
-  'js/crops.js', 'js/zip.js', 'js/ask.js', 'js/ui/chart.js',
+  'js/crops.js', 'js/zip.js', 'js/ask.js', 'js/teach.js', 'js/ui/chart.js',
   'js/vision/sevenseg.js', 'js/vision/pipeline.js', 'js/vision/tracker.js', 'js/vision/posterior.js', 'js/vision/learn.js', 'js/vision/render7seg.js', 'js/vision/sampler.js',
   'js/analysis/engine.js', 'js/analysis/kalman.js', 'js/analysis/stats.js', 'js/analysis/offline.js', 'js/analysis/sim.js',
   'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png',

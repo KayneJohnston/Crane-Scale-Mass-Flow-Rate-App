@@ -79,6 +79,13 @@ body.low-power .status-pill[data-kind="tapping"]::before { animation: none; }
   background: rgba(0, 0, 0, 0.65); font: 600 15px/1.2 ui-monospace, "SF Mono", Menlo, monospace;
 }
 .reading-badge.bad { color: var(--amber); }
+/* teach mode is keeping pictures (a clip: the dot pulses) */
+.teach-dot {
+  position: absolute; right: 8px; top: 8px; display: flex; align-items: center; gap: 5px;
+  padding: 3px 8px; border-radius: 8px; background: rgba(0, 0, 0, 0.65); font: 600 12px/1.2 -apple-system, system-ui, sans-serif;
+}
+.teach-dot i { width: 8px; height: 8px; border-radius: 50%; background: var(--red); }
+.teach-dot.rec i { animation: blink 0.8s infinite; }
 .cam-zoom {
   position: absolute; right: 8px; bottom: 8px; left: 40%; display: flex; align-items: center; gap: 6px;
   background: rgba(0, 0, 0, 0.45); border-radius: 999px; padding: 4px 10px;
@@ -173,7 +180,7 @@ h3 { margin: 4px 0 8px; font-size: 16px; }
 .field > span { font-size: 13px; color: var(--muted); }
 .field.inline { flex-direction: row; align-items: center; justify-content: space-between; gap: 12px; }
 .field.inline > span { color: var(--text); font-size: 15px; }
-.field input[type="number"], .field input[type="text"], .field input:not([type]), .field select, .field textarea, select {
+.field input[type="number"], .field input[type="text"], .field input[type="password"], .field input:not([type]), .field select, .field textarea, select {
   background: var(--card2); color: var(--text); border: 1px solid var(--line); border-radius: 10px; padding: 9px 10px; min-height: 40px;
   font-size: 16px; /* >= 16px stops iOS zooming into inputs */
 }

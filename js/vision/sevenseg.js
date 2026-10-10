@@ -64,7 +64,8 @@ export const READ_DEFAULTS = {
                        // where what looks empty must be empty too (0 = not used)
   learned: null,       // looks of digits learned on this display, per colour mode (learn.js):
   learnedRadius: 0.8,  // ... one counts for a glyph this close to it (summed over the segments),
-  learnedPenalty: 0.1, // ... fitting it this much worse than a perfect template
+  learnedPenalty: 0.1, // ... fitting it this much worse than a perfect template,
+  learnedDoubt: 0.2,   // ... and one of another digit nearly as close as this makes the reading doubtful
   cache: null,         // {} shared by reads of one crop in one colour mode at several
                        // thresholds (keeps the score image)
   keepMask: false,
@@ -671,20 +672,24 @@ export function readDigits(rgba, w, h, opts = {}) {
     // the penalty) than to the shape of every other digit - so a look learned from a digit
     // halfway between two shapes does not take in the clear digits of the other one. Then
     // that digit fits better in the lattice (what the reading history and the
-    // probabilities use: tracker.js, posterior.js), and reading another digit there is
-    // doubtful. A look never makes a reading confident on its own.
+    // probabilities use: tracker.js, posterior.js). A look of another digit than the one
+    // read that is closer, or nearly as close (learnedDoubt), makes the reading doubtful:
+    // a glowing 5 a little nearer the 9 than the 5 the person showed is not read as a 9.
+    // A look never makes a reading confident on its own.
     const learnedCost = new Map();
+    g.doubt = false;
     for (const e of looks) {
       const ch = String(e.d);
       let dist = 0;
       for (let q = 0; q < 7; q++) if (!unknown(nv, q)) dist += Math.abs(nv[q] - e.v[q]);
       const cost = dist + o.learnedPenalty;
-      if (dist > o.learnedRadius || cost >= (learnedCost.get(ch) ?? Infinity)) continue;
+      if (dist > o.learnedRadius) continue;
+      if (ch !== bestCh && cost < best + o.learnedDoubt) g.doubt = true;
+      if (cost >= (learnedCost.get(ch) ?? Infinity)) continue;
       let other = Infinity;
       for (const [c2, v] of perChar) if (c2 !== ch && v < other) other = v;
       if (cost < other) learnedCost.set(ch, cost);
     }
-    g.doubt = [...learnedCost.keys()].some((ch) => ch !== bestCh);
     g.conf = Math.max(0, Math.min(1, g.margin / 1.5));
     // segments should be clearly on or off; two or more half-lit ones = ambiguous digit
     let halfLit = 0;

@@ -163,3 +163,22 @@ test('a display whose 5s glow like 9s: after two answers, read right more often 
   assert.equal(after.wrong, 0, `never wrong after learning (${JSON.stringify(after)})`);
   assert.ok(after.right > before.right, `read right more often (${before.right} -> ${after.right})`);
 });
+
+test('the reader: a learned look of another digit nearly as close as the digit read makes it doubtful too', () => {
+  const W = 640, H = 360, buf = new Uint8ClampedArray(W * H * 4);
+  renderDisplay(buf, W, H, { text: '13050', digitH: 50 });
+  const r0 = readDigits(buf, W, H);
+  const nv = r0.lattice.nv[1], c3 = r0.lattice.costs[1][3]; // the 3, and how well it fits a 3
+  // a look of an 8 a little further from this glyph than the 3's shape is (0.15 away:
+  // 0.15 + penalty > c3): not the closest, so the 8 fits no better - but nearly as close
+  // (< c3 + learnedDoubt), so the 3 is not read on its own
+  const dist = 0.15, P = READ_DEFAULTS.learnedPenalty;
+  assert.ok(dist + P > c3 && dist + P < c3 + READ_DEFAULTS.learnedDoubt);
+  const near = nv.map((x, q) => (q === 4 ? x + dist : x)); // (segment e is dark in a 3)
+  const r = readDigits(buf, W, H, { learned: { red: [{ d: 8, v: near }] } });
+  assert.equal(r.reason, 'learned-doubt');
+  assert.equal(r.lattice.costs[1][8], r0.lattice.costs[1][8], 'the 8 fits no better');
+  // further away than the band: read as before
+  const far = nv.map((x, q) => (q === 4 ? Math.min(1, x + 0.6) : x));
+  assert.equal(readDigits(buf, W, H, { learned: { red: [{ d: 8, v: far }] } }).ok, true);
+});
