@@ -62,6 +62,9 @@ export const READ_DEFAULTS = {
                        // they are over-exposed and left to "hot" mode
   refRelThr: 0,        // reading above the usual threshold (relThr > this): the usual one,
                        // where what looks empty must be empty too (0 = not used)
+  learned: null,       // looks of digits learned on this display, per colour mode (learn.js):
+  learnedRadius: 0.8,  // ... one counts for a glyph this close to it (summed over the segments),
+  learnedPenalty: 0.1, // ... fitting it this much worse than a perfect template
   cache: null,         // {} shared by reads of one crop in one colour mode at several
                        // thresholds (keeps the score image)
   keepMask: false,
@@ -626,6 +629,7 @@ export function readDigits(rgba, w, h, opts = {}) {
   // matching. No two digits differ in that segment alone, so a doubt becomes a refusal,
   // not a misread (and a "7" that lost its top bar looks like a "1": see the "1" checks).
   const unknownSeg = [lineAbove, false, false, lineBelow, false, false, false];
+  const looks = o.learned?.[o.colorMode] || [];
   const unknown = (nv, q) => unknownSeg[q] && nv[q] < 0.5;
   const classify = (g) => {
     g.narrow = g.w < 0.6 * Wt && g.w < 0.36 * H;
@@ -662,6 +666,25 @@ export function readDigits(rgba, w, h, opts = {}) {
       if (cost < best) { second = best; best = cost; bestCh = ch; } else if (cost < second) second = cost;
     }
     g.ch = bestCh; g.cost = best; g.margin = second - best; g.nv = nv;
+    // Looks learned from what the person said (learn.js): one more way a digit appears on
+    // this display. A look counts for this glyph only when the glyph is closer to it (by
+    // the penalty) than to the shape of every other digit - so a look learned from a digit
+    // halfway between two shapes does not take in the clear digits of the other one. Then
+    // that digit fits better in the lattice (what the reading history and the
+    // probabilities use: tracker.js, posterior.js), and reading another digit there is
+    // doubtful. A look never makes a reading confident on its own.
+    const learnedCost = new Map();
+    for (const e of looks) {
+      const ch = String(e.d);
+      let dist = 0;
+      for (let q = 0; q < 7; q++) if (!unknown(nv, q)) dist += Math.abs(nv[q] - e.v[q]);
+      const cost = dist + o.learnedPenalty;
+      if (dist > o.learnedRadius || cost >= (learnedCost.get(ch) ?? Infinity)) continue;
+      let other = Infinity;
+      for (const [c2, v] of perChar) if (c2 !== ch && v < other) other = v;
+      if (cost < other) learnedCost.set(ch, cost);
+    }
+    g.doubt = [...learnedCost.keys()].some((ch) => ch !== bestCh);
     g.conf = Math.max(0, Math.min(1, g.margin / 1.5));
     // segments should be clearly on or off; two or more half-lit ones = ambiguous digit
     let halfLit = 0;
@@ -675,7 +698,10 @@ export function readDigits(rgba, w, h, opts = {}) {
     g.cost += widthPen;
     // cost of reading this glyph as each digit 0-9 (used with the temporal prior)
     g.costs = new Float64Array(10);
-    for (let d = 0; d < 10; d++) g.costs[d] = (perChar.get(String(d)) ?? 7) + widthPen + (d === 1 ? 3 : 0);
+    for (let d = 0; d < 10; d++) {
+      const ch = String(d);
+      g.costs[d] = Math.min(perChar.get(ch) ?? 7, learnedCost.get(ch) ?? 7) + widthPen + (d === 1 ? 3 : 0);
+    }
     return g;
   };
 
@@ -989,11 +1015,15 @@ export function readDigits(rgba, w, h, opts = {}) {
   }
   const u0 = glyphs[0].umin, u1 = glyphs[glyphs.length - 1].umax + 1;
   res.bandQuad = [toOrig(u0, top), toOrig(u1, top), toOrig(u1, bottom), toOrig(u0, bottom)];
-  if (!o.expectDigits || glyphs.length === o.expectDigits) res.lattice = { n: glyphs.length, costs: glyphs.map((g) => g.costs) };
+  // (with each glyph's segment fills, nv: what a person's answer teaches, learn.js)
+  if (!o.expectDigits || glyphs.length === o.expectDigits) {
+    res.lattice = { n: glyphs.length, costs: glyphs.map((g) => g.costs), nv: glyphs.map((g) => (g.nv ? Array.from(g.nv, (x) => +x.toFixed(3)) : null)), mode: o.colorMode };
+  }
 
   let text = '', minConf = 1;
   for (const g of glyphs) {
     if (!g.good) return fail(g.narrow ? 'partial-1' : 'unknown-glyph');
+    if (g.doubt) return fail('learned-doubt');
     text += g.ch; minConf = Math.min(minConf, g.conf);
   }
   // Digits read without their top bar (a 0, 2 or 7 missing its "a") mean the top of

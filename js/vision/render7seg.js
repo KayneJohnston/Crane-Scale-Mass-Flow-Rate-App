@@ -25,6 +25,8 @@ export const RENDER_DEFAULTS = {
   panelPadL: null, panelPadR: null,   // optional asymmetric horizontal padding (default panelPad)
   lit: [255, 38, 28],
   ghost: 0, ghostColor: [80, 16, 14],   // visibility of unlit segments (0..1)
+  faint: null,         // {digit: {segment: level}}: unlit segments lit this much (0..1), as by glow
+                       // bleeding into them (on a real display a 5 lit "b" a little: 5 or 9?)
   hot: 0,              // over-exposed whitish segment cores (0..1)
   glow: 0.35, glowRadius: 0.07,
   glowColor: null,     // colour of the glow (default: the lit colour). Over-exposed displays:
@@ -177,10 +179,12 @@ export function renderDisplay(buf, W, H, opts = {}) {
   const lit = new Float32Array(N), ghost = new Float32Array(N);
   const polys = segmentPolygons(Wd, Hd, t, g);
   for (let i = 0; i < n; i++) {
-    const on = SEGMENTS_FOR[o.text[i]] ?? '';
+    const on = SEGMENTS_FOR[o.text[i]] ?? '', faint = o.faint?.[o.text[i]] || {};
     for (const s of 'abcdefg') {
       const poly = polys[s].map(([x, y]) => toImg(x + i * pitch, y));
-      fillConvex(on.includes(s) ? lit : ghost, W, H, poly);
+      if (on.includes(s)) fillConvex(lit, W, H, poly);
+      else if (faint[s]) fillConvex(lit, W, H, poly, faint[s]);
+      else fillConvex(ghost, W, H, poly);
     }
     if (o.dp === i) {
       const s = t * 1.1, x = i * pitch + Wd + (pitch - Wd) / 2 - s / 2, y = Hd - s;

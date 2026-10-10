@@ -14,8 +14,9 @@ import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from
 import { CropStore, CropPolicy, CROP_DEFAULTS, cropRect, cropRecord, choicesFor, reviewOrder, reviewStats, exportFiles, cropsToDrop } from './crops.js';
 import { makeZip } from './zip.js';
 import { AskPolicy, ASK_DEFAULTS, askChoices, digitParts } from './ask.js';
+import { DigitMemory, lessonsOf } from './vision/learn.js';
 
-export const VERSION = '0.5.0';
+export const VERSION = '0.6.0';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -31,6 +32,8 @@ const camera = new Camera(video);
 const crops = new CropStore();
 const cropPolicy = new CropPolicy();
 const askPolicy = new AskPolicy();
+const LEARN_KEY = 'tapRate.learned.v1'; // what the reader learned from the person (learn.js)
+const memory = loadMemory();
 
 const app = {
   source: null,               // null | 'camera' | 'video' | 'demo'
@@ -461,7 +464,7 @@ function processFrame(el, w, h, T, wall) {
   const view = viewRect();
   // where the tap engine expects the weight: helps the reader through unclear frames
   const expect = app.engine?.expectation(T);
-  const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug, expect }, T);
+  const res = reader.read(el, w, h, view, { ...readerConfig(settings), keepDebug: !!settings.debug, expect, learned: learnedLooks() }, T);
   app.lastRes = res;
   collectCrop(res, el, w, h, T, wall);
   if (app.source === 'camera') considerAsk(res, T);
@@ -540,8 +543,9 @@ function collectCrop(res, el, w, h, T, wall) {
 }
 
 // Copy the display out of the frame now, store it when encoded. label: what the person
-// said it showed. Resolves to the crop's id, or null.
-function keepCrop(res, kind, el, w, h, T, wall, label = null) {
+// said it showed (learnt: what the reader learned from that, learn.js). Resolves to the
+// crop's id, or null.
+function keepCrop(res, kind, el, w, h, T, wall, label = null, learnt = null) {
   const rect = res?.located ? cropRect(res.located, w, h) : null;
   if (!rect) return Promise.resolve(null);
   const cv = document.createElement('canvas');
@@ -551,7 +555,7 @@ function keepCrop(res, kind, el, w, h, T, wall, label = null) {
   ctx.imageSmoothingQuality = 'high';
   ctx.drawImage(el, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.outW, rect.outH);
   const meta = cropRecord(res, kind, { t: T, wall, source: app.source, rect });
-  if (label != null) { meta.label = label; meta.labelledAt = wall; }
+  if (label != null) { meta.label = label; meta.labelledAt = wall; meta.learnt = learnt; }
   return new Promise((resolve) => cv.toBlob(async (blob) => {
     if (!blob) { resolve(null); return; }
     try {
@@ -609,7 +613,9 @@ async function renderReview() {
   await showCrop(cur);
   renderReviewStats(list);
   await renderReviewGrid(list);
-  $('reviewStats').hidden = $('reviewFoot').hidden = !list.length;
+  $('reviewStats').hidden = !list.length && !memory.stats().looks;
+  $('reviewFoot').hidden = !list.length && !memory.stats().looks;
+  $('btnCropClear').hidden = !list.length;
 }
 
 function describeCrop(c) {
@@ -663,6 +669,11 @@ async function showCrop(c) {
 async function labelCrop(c, label) {
   c.label = label;
   c.labelledAt = Date.now();
+  // the reader learns from the label what the digits it was not sure of look like; a new
+  // label replaces what it learned from the old one
+  memory.unlearn(c.learnt);
+  c.learnt = typeof label === 'number' ? learnFrom(c, label) : null;
+  saveMemory();
   await crops.update(c);
   review.skipped.delete(c.id);
   await renderReview();
@@ -675,10 +686,13 @@ function renderReviewStats(list) {
   if (s.clear) lines.push(`Clear readings: right ${s.clearRight} of ${s.clear}`);
   if (s.withTop) lines.push(`Not read or not believed: the most probable value was right ${s.topRight} of ${s.withTop} times`);
   if (s.answered) lines.push(`Answered while filming: ${s.answered}`);
+  const m = memory.stats();
+  if (m.looks) lines.push(`Learned from your answers: ${m.used ? `${m.used} digit shape${m.used > 1 ? 's' : ''} in use` : 'nothing in use yet'} (${m.looks} seen, from ${m.answers} answer${m.answers === 1 ? '' : 's'})${settings.learnLooks === false ? ', but learning is off in Settings' : ''}`);
   const T = review.test;
-  if (T) lines.push(`Reader test on ${T.n} labelled pictures: ${T.ok} read right, ${T.none} not read, ${T.wrong} misread`);
+  if (T) lines.push(`Reader test on ${T.n} labelled pictures: ${T.ok} read right, ${T.none} not read, ${T.wrong} misread${T.learned ? ' (with what it learned from you)' : ''}`);
   if (review.full) lines.push(`Storage full (${CROP_DEFAULTS.maxCrops} pictures, all labelled): export them, then delete them to keep collecting.`);
   $('reviewStats').textContent = lines.join('\n');
+  $('btnForgetLearned').hidden = !m.looks;
 }
 
 async function renderReviewGrid(list) {
@@ -731,7 +745,7 @@ async function exportCrops() {
     const b = await crops.image(c.id);
     if (b) images.set(c.id, new Uint8Array(b));
   }
-  const about = { version: VERSION, display: { minKg: +settings.minKg, maxKg: +settings.maxKg, stepKg: +settings.stepKg, multiplier: +settings.multiplier } };
+  const about = { version: VERSION, display: { minKg: +settings.minKg, maxKg: +settings.maxKg, stepKg: +settings.stepKg, multiplier: +settings.multiplier }, learned: memory.toJSON() };
   const zip = makeZip(exportFiles(list, images, about));
   await shareOrDownload(`tap-rate-review-${datestamp()}.zip`, zip, 'application/zip');
 }
@@ -752,8 +766,8 @@ async function testReaderOnCrops() {
   if (!list.length) { toast('Label some pictures first'); return; }
   toast(`Reading ${list.length} pictures…`);
   const rd = new BrowserReader();
-  const cfg = { ...readerConfig(settings), temporal: false };
-  const T = { n: 0, ok: 0, none: 0, wrong: 0 };
+  const cfg = { ...readerConfig(settings), temporal: false, learned: learnedLooks() };
+  const T = { n: 0, ok: 0, none: 0, wrong: 0, learned: !!cfg.learned && Object.keys(cfg.learned).length > 0 };
   for (const c of list) {
     const buf = await crops.image(c.id);
     if (!buf) continue;
@@ -782,6 +796,38 @@ async function clearCrops() {
   review.test = null;
   await renderReview();
   toast('Deleted');
+}
+
+// ------------------------------- learning the display's digits (learn.js) --
+
+// What the person said the display showed teaches the reader what the digits it was not
+// sure of look like on this display. Kept on the phone, so it is there the next time the
+// app is opened (LEARN_KEY); "Forget" in Review clears it.
+function loadMemory() {
+  try { return new DigitMemory(JSON.parse(localStorage.getItem(LEARN_KEY) || 'null')); } catch { return new DigitMemory(); }
+}
+
+function saveMemory() {
+  try { localStorage.setItem(LEARN_KEY, JSON.stringify(memory)); } catch (e) { console.warn('what was learned is not saved', e); }
+}
+
+// the looks the reader uses (none while learning is off)
+const learnedLooks = () => (settings.learnLooks === false ? null : memory.active());
+
+// learn from a reading (or a crop's record) the person said showed v; returns what
+// memory.unlearn() needs to take it back
+function learnFrom(res, v) {
+  if (settings.learnLooks === false) return null;
+  const t = memory.learn(lessonsOf(res, v, readerConfig(settings)));
+  return t.length ? t : null;
+}
+
+function forgetLearned() {
+  if (!confirm('Forget the digit shapes the reader learned from your answers? Your answers and pictures stay.')) return;
+  memory.forget();
+  saveMemory();
+  renderReview();
+  toast('Forgotten');
 }
 
 // ------------------------------------- asking what the display shows --
@@ -904,12 +950,15 @@ function answerAsk(v) {
   const T = nowSec(), wall = Date.now(), res = app.lastRes;
   const corrected = q.kind === 'correct' && q.res?.ok && q.res.value !== v ? q.res.value : null;
   q.undo = reader.tell(T, v, readerConfig(settings), corrected);
+  // ... and learns what the digits it was not sure of (or got wrong) look like
+  q.learnt = learnFrom(res, v);
+  saveMemory();
   app.engine?.pushFrame(T, wall, v, 1, 'told');
   askPolicy.answered(T);
   q.cropId = null; q.undone = false;
   const keep = settings.collectCrops && !review.full && res?.located && app.source === 'camera';
   if (keep) {
-    keepCrop(res, q.kind === 'correct' ? 'corrected' : 'asked', video, video.videoWidth, video.videoHeight, T, wall, v).then((id) => {
+    keepCrop(res, q.kind === 'correct' ? 'corrected' : 'asked', video, video.videoWidth, video.videoHeight, T, wall, v, q.learnt).then((id) => {
       if (!id) return;
       if (q.undone) crops.delete(id).then(() => { review.count.total--; updateReviewBadge(); }).catch(() => {});
       else q.cropId = id;
@@ -926,6 +975,9 @@ function undoAnswer() {
   const q = asking.open;
   if (!q || q.stage !== 'done') return;
   reader.untell(q.undo);
+  memory.unlearn(q.learnt);
+  q.learnt = null;
+  saveMemory();
   q.undone = true;
   if (q.cropId) crops.delete(q.cropId).then(() => { review.count.total--; updateReviewBadge(); }).catch(() => {});
   q.cropId = null;
@@ -1729,6 +1781,7 @@ function wire() {
   $('btnCropExport').addEventListener('click', () => exportCrops().catch((e) => toast(`Export failed: ${e.message}`)));
   $('btnCropTest').addEventListener('click', () => testReaderOnCrops());
   $('btnCropClear').addEventListener('click', () => clearCrops());
+  $('btnForgetLearned').addEventListener('click', () => forgetLearned());
   // settings tools
   $('selCamera').addEventListener('change', (e) => { settings.deviceId = e.target.value; saveSettings(settings); restartCamera(); });
   $('fileVideo').addEventListener('change', (e) => { const f = e.target.files?.[0]; e.target.value = ''; if (f) loadVideo(f); });
@@ -1783,7 +1836,7 @@ async function init() {
   }
   const p = new URLSearchParams(location.search);
   if (p.has('demo')) startDemo(+p.get('demo') || 5, +p.get('seed') || 0);
-  window.__tapRate = { app, settings: () => settings, store, crops }; // for debugging / automated tests
+  window.__tapRate = { app, settings: () => settings, store, crops, memory }; // for debugging / automated tests
 }
 
 init();

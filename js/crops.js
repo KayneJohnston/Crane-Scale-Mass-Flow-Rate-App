@@ -75,10 +75,13 @@ export function cropRecord(res, kind, { t, wall, source, rect }) {
     pred: res.pred ? { value: Math.round(res.pred.value), band: Math.round(res.pred.band), external: !!res.pred.external } : null,
     // the reader's per-digit costs (sevenseg.js), for checking the probabilities
     lattice: res.lattice?.costs ? res.lattice.costs.map((row) => Array.from(row, (x) => Math.round(x * 100) / 100)) : null,
+    // ... in every colour mode, with each digit's segment fills: what a label teaches (learn.js)
+    lattices: res.lattices?.length ? res.lattices.map((L) => ({ mode: L.mode, n: L.n, nv: L.nv, costs: L.costs.map((row) => Array.from(row, (x) => Math.round(x * 100) / 100)) })) : null,
     rect: rect ? { x: rect.x, y: rect.y, w: rect.w, h: rect.h } : null,
     w: rect?.outW ?? null, h: rect?.outH ?? null,
     label: null,       // what the display showed (kg), or 'unreadable'
     labelledAt: null,
+    learnt: null,      // what the reader learned from the label (learn.js), to take back on a new one
   };
 }
 

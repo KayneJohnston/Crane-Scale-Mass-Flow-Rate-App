@@ -81,6 +81,8 @@ export function readFrame(sample, srcW, srcH, view, cfg = {}, track = {}, t = nu
       track.misses = 0;
     }
   } else if (base.ok) res.how = 'ok';
+  // every colour mode's digit costs and segment fills: what a person's answer teaches (learn.js)
+  res.lattices = attempts.map((a) => a.lattice).filter(Boolean);
   if (res.ok && res.mode) track.lastMode = res.mode;
   if (!base.located) track.misses = (track.misses || 0) + 1;
   if (track.misses > 15) track.prev = null; // forget the old position after a while
@@ -125,7 +127,7 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
       const readAt = (relThr) => {
         // "bright" mode also sees glare and unlit segments, so demand clearer digits there
         const r = readDigits(img2, rw, rh, {
-          colorMode: mode, strictness: c.strictness, keepMask: c.keepDebug, expectDigits: expect,
+          colorMode: mode, strictness: c.strictness, keepMask: c.keepDebug, expectDigits: expect, learned: c.learned,
           maxDigits: String(Math.round(c.maxKg / (c.multiplier || 1))).length, cache,
           ...(relThr ? { relThr, refRelThr: READ_DEFAULTS.relThr } : {}),
           ...(mode === 'bright' ? { minMargin: 0.8, maxCost: 1.3 } : {}),
