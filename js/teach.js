@@ -207,8 +207,10 @@ const CLEAR = new Set(['ok', 'locked', 'jump-accepted', 'told']);
  * was sent with it: {truth: kg | null, from: 'person' | 'readings' | null}. What the person
  * said within 1 s; else the clear readings around it (the app's, or the person's), if the
  * last within gapMs before and the first within gapMs after show the same value: the
- * weight only rises during a tap, so it can't have been anything else in between.
- * readings: [[wall, kg | null, confidence, how]] in time order, answers: [{wall, value}].
+ * weight only rises while metal pours, so it was that in between - unless the app held
+ * back a jump in between (a touch or a bounce: the display showed something else for a
+ * moment, as on the real scale). readings: [[wall, kg | null, confidence, how]] in time
+ * order, answers: [{wall, value}].
  */
 export function labelOf(wall, readings, answers, gapMs = 5000) {
   const a = answers.find((x) => Math.abs(x.wall - wall) <= 1000);
@@ -219,8 +221,9 @@ export function labelOf(wall, readings, answers, gapMs = 5000) {
     if (r[0] <= wall && wall - r[0] <= gapMs) before = r;
     else if (r[0] > wall && r[0] - wall <= gapMs && !after) after = r;
   }
-  if (before && after && before[1] === after[1]) return { truth: before[1], from: 'readings' };
-  return { truth: null, from: null };
+  if (!before || !after || before[1] !== after[1]) return { truth: null, from: null };
+  if (readings.some((r) => r[0] >= before[0] && r[0] <= after[0] && (r[3] === 'jump-pending' || r[3] === 'digit-slip'))) return { truth: null, from: null };
+  return { truth: before[1], from: 'readings' };
 }
 
 /** "34 pictures, 2 clips (11.2 MB)" */

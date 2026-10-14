@@ -234,3 +234,40 @@ test('main indicator: too fast -> red down, on target -> green', () => {
   assert.equal(last.status, 'fast');
   assert.equal(last.certain, true);
 });
+
+// A saved session as the engine leaves it (readings every 0.5 s on a 50 kg display;
+// flag 1 accepted, 3 a touch), for the after-tap analysis on its own.
+function savedSession(dur, weight, seen = () => true, flag = () => 1) {
+  const meas = [];
+  for (let t = 0; t <= dur; t += 0.5) if (seen(t)) meas.push({ t, z: Math.floor(weight(t) / 50) * 50, n: 5, f: flag(t) });
+  return { id: 'x', duration: dur, meas, config: { targetKgMin: 600, tolPct: 10, stepKg: 50 }, events: [], noiseSigma: 15 };
+}
+const ramp = (t0, t1, kgMin) => (t) => (Math.max(0, Math.min(t, t1) - t0) * kgMin) / 60;
+
+test('a tap whose end was out of view still counts, up to the last reading', () => {
+  // From a real recording: the display went out of view near the end of a tap, came
+  // back for a few readings, and then the crucible rested on something for minutes.
+  // The level after the tap came from no readings at all, and the total was blank.
+  const s = savedSession(500, (t) => 19000 + ramp(60, 320, 600)(t) - (t >= 345 ? 250 : 0), (t) => t < 300 || t >= 340, (t) => (t >= 345 ? 3 : 1));
+  const a = analyseSession(s);
+  assert.equal(a.segments.length, 1);
+  const g = a.segments[0];
+  assert.equal(g.openEnd, true);
+  assert.ok(g.end <= 300, `ends at the last reading before the gap (${g.end})`);
+  assert.ok(Math.abs(g.massKg - 2400) <= 100, `mass ${g.massKg}`);
+  assert.ok(Math.abs(g.avgKgMin - 600) <= 30, `avg ${g.avgKgMin}`);
+  assert.ok(Number.isFinite(a.totals.massKg) && Number.isFinite(a.totals.avgKgMin));
+});
+
+test('taps never overlap, so no metal is counted twice', () => {
+  // From a real recording: a slow start, the display out of view, then the full flow.
+  // The second tap was searched for from where the first one's rise had seemed to end,
+  // before that end was refined past it: 134 kg counted in both.
+  for (const slow of [120, 180]) {
+    const truth = ramp(25, 90, slow)(560) + ramp(90, 560, 430)(560);
+    const s = savedSession(650, (t) => 17550 + ramp(25, 90, slow)(t) + ramp(90, 560, 430)(t), (t) => t < 90 || t >= 125);
+    const a = analyseSession(s);
+    for (let i = 1; i < a.segments.length; i++) assert.ok(a.segments[i].onset >= a.segments[i - 1].end, `slow ${slow}: tap ${i + 1} starts before tap ${i} ends`);
+    assert.ok(Math.abs(a.totals.massKg - truth) <= 100, `slow ${slow}: ${a.totals.massKg} kg vs ${Math.round(truth)}`);
+  }
+});

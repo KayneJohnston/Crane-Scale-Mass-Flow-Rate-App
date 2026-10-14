@@ -47,6 +47,7 @@ export const READ_DEFAULTS = {
   minLevel: 25,
   relThr: 0.5,        // threshold at 50% between background and segment core (edge of a blurred step)
   hiFrac: 0.004,      // "segment core" level = value exceeded by this fraction of the crop
+  otsuFloor: true,     // ... and never below Otsu's split of the histogram
   minPixels: 40,
   maxPoints: 40000,
   maxRotDeg: 12,
@@ -217,7 +218,7 @@ function adaptiveThreshold(sm, n, o) {
   let pHi = 255;
   for (let acc = 0; pHi > 0; pHi--) { acc += hist[pHi]; if (acc >= need) break; }
   const contrast = pHi - p50;
-  const T = Math.max(otsu(hist, n), p50 + o.relThr * contrast, o.minLevel);
+  const T = Math.max(o.otsuFloor === false ? 0 : otsu(hist, n), p50 + o.relThr * contrast, o.minLevel);
   return { T, contrast, p50, pHi };
 }
 
@@ -675,7 +676,9 @@ export function readDigits(rgba, w, h, opts = {}) {
     // probabilities use: tracker.js, posterior.js). A look of another digit than the one
     // read that is closer, or nearly as close (learnedDoubt), makes the reading doubtful:
     // a glowing 5 a little nearer the 9 than the 5 the person showed is not read as a 9.
-    // A look never makes a reading confident on its own.
+    // A look never makes a reading confident on its own. Looks the app came with (seed:
+    // learned from pictures of another day, seed-looks.js) only help: in another light
+    // they made clear digits doubtful (the 7 October video read 4% fewer frames).
     const learnedCost = new Map();
     g.doubt = false;
     for (const e of looks) {
@@ -684,7 +687,7 @@ export function readDigits(rgba, w, h, opts = {}) {
       for (let q = 0; q < 7; q++) if (!unknown(nv, q)) dist += Math.abs(nv[q] - e.v[q]);
       const cost = dist + o.learnedPenalty;
       if (dist > o.learnedRadius) continue;
-      if (ch !== bestCh && cost < best + o.learnedDoubt) g.doubt = true;
+      if (ch !== bestCh && cost < best + o.learnedDoubt && !e.seed) g.doubt = true;
       if (cost >= (learnedCost.get(ch) ?? Infinity)) continue;
       let other = Infinity;
       for (const [c2, v] of perChar) if (c2 !== ch && v < other) other = v;
@@ -707,6 +710,10 @@ export function readDigits(rgba, w, h, opts = {}) {
       const ch = String(d);
       g.costs[d] = Math.min(perChar.get(ch) ?? 7, learnedCost.get(ch) ?? 7) + widthPen + (d === 1 ? 3 : 0);
     }
+    // A glyph lit like a "1" but too wide for one (on the real display, a dot beside it
+    // or its glow) is as likely a "1" as the digit next best by its strokes (a "7"
+    // without its top bar): the readings around it decide, not the picture.
+    if (bestCh === '1') g.costs[1] = Math.min(g.costs[1], ...g.costs.filter((_, d) => d !== 1));
     return g;
   };
 
@@ -1013,7 +1020,7 @@ export function readDigits(rgba, w, h, opts = {}) {
   // digits fit the value expected from the previous readings.
   for (const g of glyphs) {
     const quad = [toOrig(g.umin, top), toOrig(g.umax + 1, top), toOrig(g.umax + 1, bottom), toOrig(g.umin, bottom)];
-    const d = { ch: g.ch, conf: g.conf, cost: g.cost, margin: g.margin, quad };
+    const d = { ch: g.ch, conf: g.conf, cost: g.cost, margin: g.margin, good: !!g.good && !g.doubt, quad };
     if (g.narrow) Object.assign(d, { cover: [+g.cu.toFixed(2), +g.cl.toFixed(2)], wid: +(g.w / H).toFixed(2), extent: +g.extent.toFixed(2) });
     else d.fills = Array.from(g.nv, (x) => +x.toFixed(2));
     res.digits.push(d);

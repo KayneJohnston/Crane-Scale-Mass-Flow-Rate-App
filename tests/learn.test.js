@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { lessons, lessonsOf, DigitMemory } from '../js/vision/learn.js';
+import { lessons, lessonsOf, DigitMemory, mergeLooks } from '../js/vision/learn.js';
+import { SEED_LOOKS, SEED_ABOUT } from '../js/vision/seed-looks.js';
 import { readDigits, READ_DEFAULTS } from '../js/vision/sevenseg.js';
 import { renderDisplay } from '../js/vision/render7seg.js';
 import { makeSampler } from '../js/vision/sampler.js';
@@ -181,4 +182,26 @@ test('the reader: a learned look of another digit nearly as close as the digit r
   // further away than the band: read as before
   const far = nv.map((x, q) => (q === 4 ? Math.min(1, x + 0.6) : x));
   assert.equal(readDigits(buf, W, H, { learned: { red: [{ d: 8, v: far }] } }).ok, true);
+});
+
+test('looks from the app and from the person are used together, per colour mode', () => {
+  const seed = { hot: [{ d: 8, v: NV9 }] }, mine = { hot: [{ d: 5, v: NV5 }], red: [{ d: 9, v: NV9 }] };
+  const all = mergeLooks(seed, mine, null);
+  assert.deepEqual(all, { hot: [{ d: 8, v: NV9 }, { d: 5, v: NV5 }], red: [{ d: 9, v: NV9 }] });
+  assert.deepEqual(seed.hot.length, 1, 'the sets given are left as they were');
+});
+
+test('the digit shapes the app comes with are well formed (seed-looks.js)', () => {
+  let n = 0;
+  for (const [mode, looks] of Object.entries(SEED_LOOKS)) {
+    assert.ok(['red', 'hot', 'bright'].includes(mode), mode);
+    for (const L of looks) {
+      n++;
+      assert.ok(Number.isInteger(L.d) && L.d >= 0 && L.d <= 9, `digit ${L.d}`);
+      assert.equal(L.v.length, 7);
+      assert.ok(L.v.every((x) => x >= 0 && x <= 1), `${L.v}`);
+      assert.equal(L.seed, true, 'marked as the app\'s own (it never makes a reading doubtful)');
+    }
+  }
+  assert.equal(n, SEED_ABOUT.looks);
 });

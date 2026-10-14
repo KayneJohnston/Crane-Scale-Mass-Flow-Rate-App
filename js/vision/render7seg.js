@@ -27,6 +27,8 @@ export const RENDER_DEFAULTS = {
   ghost: 0, ghostColor: [80, 16, 14],   // visibility of unlit segments (0..1)
   faint: null,         // {digit: {segment: level}}: unlit segments lit this much (0..1), as by glow
                        // bleeding into them (on a real display a 5 lit "b" a little: 5 or 9?)
+  dim: null,           // {digit: {segment: level}}: lit segments only this bright (0..1), as the
+                       // middle bar of the real display's 8s (14 October)
   hot: 0,              // over-exposed whitish segment cores (0..1)
   glow: 0.35, glowRadius: 0.07,
   glowColor: null,     // colour of the glow (default: the lit colour). Over-exposed displays:
@@ -179,10 +181,10 @@ export function renderDisplay(buf, W, H, opts = {}) {
   const lit = new Float32Array(N), ghost = new Float32Array(N);
   const polys = segmentPolygons(Wd, Hd, t, g);
   for (let i = 0; i < n; i++) {
-    const on = SEGMENTS_FOR[o.text[i]] ?? '', faint = o.faint?.[o.text[i]] || {};
+    const on = SEGMENTS_FOR[o.text[i]] ?? '', faint = o.faint?.[o.text[i]] || {}, dim = o.dim?.[o.text[i]] || {};
     for (const s of 'abcdefg') {
       const poly = polys[s].map(([x, y]) => toImg(x + i * pitch, y));
-      if (on.includes(s)) fillConvex(lit, W, H, poly);
+      if (on.includes(s)) fillConvex(lit, W, H, poly, dim[s] ?? 1);
       else if (faint[s]) fillConvex(lit, W, H, poly, faint[s]);
       else fillConvex(ghost, W, H, poly);
     }

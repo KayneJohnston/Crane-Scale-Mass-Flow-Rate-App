@@ -150,3 +150,15 @@ export class DigitMemory {
     this.looks = this.looks.filter((L) => !drop.has(L));
   }
 }
+
+/**
+ * Looks from several sources in one set, per colour mode: the ones the app comes with
+ * (seed-looks.js, learned from labelled pictures of the display) and the person's own
+ * (DigitMemory.active()). Both count in a glyph's digit costs; only the person's make a
+ * reading that disagrees with them doubtful (sevenseg.js).
+ */
+export function mergeLooks(...sets) {
+  const out = {};
+  for (const s of sets) for (const [mode, xs] of Object.entries(s || {})) (out[mode] ||= []).push(...xs);
+  return out;
+}

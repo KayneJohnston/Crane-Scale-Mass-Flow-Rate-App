@@ -8,6 +8,7 @@ import { encodePNG } from './png.js';
 import { writeFileSync, mkdirSync } from 'node:fs';
 
 const count = +(process.argv[2] || 200);
+const CFG = JSON.parse(process.env.CFG || '{}'); // reader settings to try, e.g. CFG='{"hotThresholds":[0.6,0.4]}'
 const offIdx = process.argv.indexOf('--offset');
 const offset = offIdx > 0 ? +process.argv[offIdx + 1] : 0;
 const dumpIdx = process.argv.indexOf('--dump');
@@ -92,12 +93,16 @@ function run() {
   const reasons = {};
   const t0 = Date.now();
   const hot = process.argv.includes('--hot');
+  // --dim 0.6: every "8" with its middle bar that bright, as on the real display (14 October)
+  const dimIdx = process.argv.indexOf('--dim');
+  const dim = dimIdx > 0 ? { 8: { g: +process.argv[dimIdx + 1] } } : null;
   for (let s = 1 + offset; s <= count + offset; s++) {
     const { W, H, value, opts } = hot ? hotScene(s, { dashes: process.argv.includes('--dashes') }) : randomScene(s, process.argv.includes('--hard'));
+    if (dim) opts.dim = dim;
     const buf = new Uint8ClampedArray(W * H * 4);
     renderDisplay(buf, W, H, opts);
     const sample = makeSampler(buf, W, H);
-    const res = readFrame(sample, W, H, { x: 0, y: 0, w: W, h: H }, {});
+    const res = readFrame(sample, W, H, { x: 0, y: 0, w: W, h: H }, CFG);
     if (res.ok && res.value === value) ok++;
     else if (res.ok) {
       wrong++;

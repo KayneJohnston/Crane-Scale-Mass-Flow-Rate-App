@@ -16,7 +16,7 @@ import { robustSlope, hingeOnset, hingeStop, median, lowerBound } from './stats.
 import { smoothRate, rateVarToS } from './kalman.js';
 
 // bump when the analysis changes, so saved taps are analysed again
-export const ANALYSIS_VERSION = 4;
+export const ANALYSIS_VERSION = 5;
 
 export const OFFLINE_DEFAULTS = {
   onKgMin: 150,
@@ -116,10 +116,13 @@ export function analyseSession(sess, opts = {}) {
   const touches = (sess.events || []).filter((e) => e.type === 'touch-end');
   const Sq = rateVarToS(cfg.rateVar ?? 100);
   const curves = [];
+  // where the last tap kept ended: the next one never starts before it (its metal
+  // would be counted twice)
+  let lastEnd = -Infinity;
   for (let k = 0; k < runs.length; k++) {
     const [rs, re] = runs[k];
     // (never reaching into the previous or the next tap)
-    const prevEnd = k > 0 ? runs[k - 1][1] : -Infinity, nextStart = k + 1 < runs.length ? runs[k + 1][0] : Infinity;
+    const prevEnd = Math.max(k > 0 ? runs[k - 1][1] : -Infinity, lastEnd), nextStart = k + 1 < runs.length ? runs[k + 1][0] : Infinity;
     // refine the start: flat-then-rising change point
     let a0 = lowerBound(t, Math.max(prevEnd, rs - 45)), a1 = lowerBound(t, Math.min(re, rs + 40));
     const hOn = hingeOnset(t.slice(a0, a1), z.slice(a0, a1), { minTail: 3 });
@@ -128,8 +131,7 @@ export function analyseSession(sess, opts = {}) {
     a0 = lowerBound(t, Math.max(onset + 5, re - 40)); a1 = lowerBound(t, Math.min(nextStart, re + 45));
     const hOff = hingeStop(t.slice(a0, a1), z.slice(a0, a1), { minHead: 3 });
     let end = hOff ? hOff.tau : re + o.halfWin / 2;
-    onset = Math.max(t[0], onset); end = Math.min(t[n - 1], Math.max(end, onset + 1));
-    const dt = end - onset;
+    onset = Math.max(t[0], prevEnd, onset); end = Math.min(t[n - 1], Math.max(end, onset + 1));
     // levels before / after
     const lvl = (from, to) => {
       const i0 = lowerBound(t, from), i1 = lowerBound(t, to);
@@ -151,12 +153,18 @@ export function analyseSession(sess, opts = {}) {
     let levelAfter, openEnd = false;
     if (after) levelAfter = after.v;
     else {
+      // The weight was not seen settling after the tap (the recording ended, or the
+      // display went out of view): the tap ends with the last reading seen, at the level
+      // the last readings show.
       openEnd = true;
-      const i0 = lowerBound(t, end - 5);
-      levelAfter = median(z.slice(i0, lowerBound(t, end + 0.01) || n));
+      const i1 = lowerBound(t, end + 0.01);
+      if (i1 < 1 || t[i1 - 1] <= onset) continue;
+      end = t[i1 - 1];
+      levelAfter = median(z.slice(lowerBound(t, end - 5), i1));
     }
-    const dm = levelAfter - levelBefore;
-    if (dt < o.minSegSec || dm < o.minSegKg) continue;
+    const dt = end - onset, dm = levelAfter - levelBefore;
+    if (!(dt >= o.minSegSec && dm >= o.minSegKg)) continue;
+    lastEnd = end;
     const avg = (dm / dt) * 60;
     // uncertainty: level medians (n_eff ~ n/3 for correlated readings) and +/-1 s timing at each end
     const sig = Math.max(sigmaFloor, sess.noiseSigma || 30);

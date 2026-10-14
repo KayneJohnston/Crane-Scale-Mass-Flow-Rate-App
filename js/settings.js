@@ -24,6 +24,7 @@ export const DEFAULTS = {
   relockFrames: 3,
   collectCrops: true,
   learnLooks: true,
+  seedLooks: true,
   // teach mode (teach.js)
   teachMode: false,
   teachWhen: 'camera',
@@ -105,6 +106,7 @@ export const SCHEMA = [
       { key: 'askAfterSec', label: 'Ask after it has been unclear for', unit: 's', type: 'number', min: 1, max: 60, step: 1 },
       { key: 'collectCrops', label: 'Keep hard-to-read frames for review', type: 'checkbox', help: 'Pictures of the display from frames the app could not read or had to guess (at most one every 3 s and 20 every 10 minutes, 200 in all) stay on this phone for you to label in Review, and to export.' },
       { key: 'learnLooks', label: 'Learn the display’s digits from my answers', type: 'checkbox', help: 'Your answers, corrections and Review labels teach the reader what the digits it was not sure of look like on this display (a 5 that glows like a 9). A shape is used once you have said the same digit about it twice. It is kept on this phone; Review › “Forget learned shapes” clears it.' },
+      { key: 'seedLooks', label: 'Start with the digit shapes learned from labelled pictures', type: 'checkbox', help: 'The app comes knowing how the digits it is often unsure of look on the crane scale’s display, learned from the pictures labelled so far (an 8 whose middle bar is dim, a 9 whose upper right is faint). Where your own answers say otherwise, the reader asks rather than guesses. Turn this off for a different display.' },
     ],
     help: 'A question closes by itself after 12 s. After “Not now” or “Can’t tell” the app waits a minute; if questions go unanswered it waits longer each time, up to 5 minutes. Your answers count as readings, and their pictures go to Review already labelled. The ✎ next to the reading on the live screen corrects it any time.',
   },

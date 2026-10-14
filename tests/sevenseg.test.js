@@ -134,6 +134,24 @@ test('dashes at the middle height between the digits ("-2-1800." for 21800) are 
   assert.ok(ok / N >= 0.75, `read rate ${ok}/${N}`);
 });
 
+test('an over-exposed display whose 8s have a dim middle bar (as on 14 October) never reads the 8 as a 0', () => {
+  // At 70% of the other strokes the bar vanishes at the usual threshold and above: 0.7.1
+  // read 18,000 as 10,000 (or 25,850 as 25,050) in 9 of these 60 scenes. A low threshold
+  // shows the bar, and lower thresholds complete it where the usual one only half saw it.
+  let ok = 0, wrong = 0;
+  const N = 60, wrongs = [];
+  for (let s = 1; s <= N; s++) {
+    const value = [18000, 17800, 25850, 23850, 18050][s % 5];
+    const sc = hotScene(s, { value });
+    sc.opts.dim = { 8: { g: 0.7 } };
+    const r = readScene(sc, { expectDigits: 5 });
+    if (r.ok && r.value === value) ok++;
+    else if (r.ok) { wrong++; wrongs.push(`${value} read ${r.value}`); }
+  }
+  assert.equal(wrong, 0, wrongs.join(', '));
+  assert.ok(ok >= 35, `read ${ok} of ${N}`);
+});
+
 test('a normally exposed red display is not read as an over-exposed one', () => {
   const { buf, W, H } = scene('17000', { glow: 0.45, gain: 1.2, lit: [255, 41, 24] });
   const r = readFrame(makeSampler(buf, W, H), W, H, { x: 0, y: 0, w: W, h: H }, { colorMode: 'hot' });

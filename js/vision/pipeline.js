@@ -23,13 +23,20 @@ export const PIPE_DEFAULTS = {
   decodeMaxDigitExcess: 0.5, // ... only settle digits that were ambiguous (never overrule a clear one)
   decodeMaxDigitCost: 2.2, // ... and no digit may fit worse than this
   // over-exposed digits: thresholds (share of the way from background to the brightest
-  // cores) to try when the usual one gives no reading; a value is taken when two agree
-  hotThresholds: [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9],
+  // cores) to try when the usual one gives no reading; a value is taken when two agree.
+  // Higher ones see through a heavy glow, lower ones complete a stroke too dim for the
+  // usual one (the real display's 8s on 14 October)
+  hotThresholds: [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9, 0.45, 0.4, 0.35],
+  hotKeepSure: true,   // ... a digit read clearly at the usual threshold must read the same there
+  hotCheckLow: [0.4, 0.3], // ... and a value taken must not read as another one this low (a dim stroke)
   readDigitH: 46,      // digit height (px) a crop that gave no reading is read again at
   keepDebug: false,
 };
 
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
+// digit y has every stroke of digit x, and more (an 8 and a 0)
+const STROKES = ['abcdef', 'bc', 'abdeg', 'abcdg', 'bcfg', 'acdfg', 'acdefg', 'abc', 'abcdefg', 'abcdfg'];
+const moreStrokes = (y, x) => y !== x && /\d/.test(y) && /\d/.test(x) && [...STROKES[+x]].every((q) => STROKES[+y].includes(q));
 
 /**
  * Read one frame.
@@ -130,6 +137,8 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
           colorMode: mode, strictness: c.strictness, keepMask: c.keepDebug, expectDigits: expect, learned: c.learned,
           maxDigits: String(Math.round(c.maxKg / (c.multiplier || 1))).length, cache,
           ...(relThr ? { relThr, refRelThr: READ_DEFAULTS.relThr } : {}),
+          // (below the usual threshold, Otsu's split of a dark crop would undo the lower one)
+          ...(relThr && relThr < READ_DEFAULTS.relThr ? { otsuFloor: false } : {}),
           ...(mode === 'bright' ? { minMargin: 0.8, maxCost: 1.3 } : {}),
         });
         let val = r.ok ? validateReading(r.text, r.conf, c) : { ok: false, why: r.reason };
@@ -165,10 +174,31 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
           seen.set(val.value, [{ t: READ_DEFAULTS.relThr, r, val }]);
           val = { ok: false, why: 'unconfirmed' };
         }
+        // A digit the usual threshold reads clearly is not one the glow or a dim stroke
+        // changed: another threshold that reads it as something else is not used (a
+        // lower one may grow a "1" a top bar from the glow above it, a higher one may
+        // drop a dim stroke).
+        const sure = c.hotKeepSure && first.digits?.length ? first.digits.map((d) => (d.good ? d.ch : null)) : null;
+        const keeps = (v) => {
+          if (!sure) return true;
+          const s = String(Math.round(v / (c.multiplier || 1)));
+          return s.length !== sure.length || sure.every((ch, i) => ch == null || ch === s[i]);
+        };
+        // A lower threshold only settles a digit the usual one found but could not tell, by
+        // a stroke too dim for it: where the usual one could not even make out the digits,
+        // or where a stroke appears that was dark there, it is the glow it lets in (a dot
+        // beside a "1" grows into the top bar of a "7").
+        const nv0 = first.lattice?.nv;
+        const grown = (rr) => {
+          const nv1 = rr.lattice?.nv;
+          if (!nv0 || !nv1 || nv1.length !== nv0.length) return true;
+          return nv1.some((v, i) => v && nv0[i] && v.some((x, q) => x >= 0.5 && nv0[i][q] <= 0.1));
+        };
         for (const t of order) {
+          if (t < READ_DEFAULTS.relThr && !nv0) continue;
           const a = readAt(t);
           offerLattice(a.r, map);
-          if (!a.val.ok) continue;
+          if (!a.val.ok || !keeps(a.val.value) || (t < READ_DEFAULTS.relThr && grown(a.r))) continue;
           if (seen.size && !seen.has(a.val.value)) { why = 'unstable'; break; }
           if (!seen.has(a.val.value)) seen.set(a.val.value, []);
           const agree = seen.get(a.val.value);
@@ -181,6 +211,24 @@ function attempt(sample, srcW, srcH, view, c, track, mode) {
           }
         }
         if (!val.ok && !why && seen.size) why = 'unconfirmed';
+      }
+      // A stroke too dim for the usual threshold (the middle bar of the real display's 8s,
+      // at about 70% of the other strokes) vanishes at it and above, and the 8 reads as a
+      // clear 0 at every threshold tried. A low one shows the stroke again: where it reads
+      // another valid value, the frame is not read on its own (the readings around decide).
+      if (val.ok && mode === 'hot' && c.hotCheckLow?.length) {
+        const ds = String(Math.round(val.value / (c.multiplier || 1)));
+        for (const t of c.hotCheckLow) {
+          const a = readAt(t), lo = a.r.digits || [];
+          // (digit by digit too, by the digit each glyph looks most like: elsewhere in the
+          // row the glow a low threshold lets in may spoil its reading, as a "1" that no
+          // longer stands alone)
+          if ((a.val.ok && a.val.value !== val.value) || (lo.length === ds.length && lo.some((d, i) => moreStrokes(d.ch, ds[i])))) {
+            val = { ok: false, why: 'unstable' };
+            why = 'unstable';
+            break;
+          }
+        }
       }
       return { r, val, why, first, img2, rw, rh, sy, map };
     };

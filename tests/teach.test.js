@@ -260,4 +260,7 @@ test('what the display showed at a picture: what the person said, else the clear
   assert.deepEqual(labelOf(w + 3000, readings, [], 1000), { truth: null, from: null }, 'nothing clear close enough');
   assert.deepEqual(labelOf(w + 2000, [[w + 1500, 18500, 1, 'ok'], [w + 2500, 18550, 1, 'ok']], []), { truth: null, from: null }, 'before and after differ: it changed');
   assert.deepEqual(labelOf(w, [[w - 500, 18500, 0.9, 'prior'], [w + 500, 18500, 1, 'ok']], []), { truth: null, from: null }, 'a guess is not clear');
+  // a touch or a bounce: the app held a jump back, or the readings around disagree
+  assert.deepEqual(labelOf(w, [[w - 2000, 21000, 1, 'ok'], [w - 300, null, 0, 'jump-pending'], [w + 2000, 21000, 1, 'ok']], []), { truth: null, from: null });
+  assert.deepEqual(labelOf(w, [[w - 3000, 21000, 1, 'ok'], [w - 1500, 20900, 1, 'ok'], [w + 2000, 21000, 1, 'ok']], []), { truth: null, from: null });
 });

@@ -14,10 +14,11 @@ import { sessionCSV, rawCSV, summaryCSV, shareOrDownload, sessionFileBase } from
 import { CropStore, CropPolicy, CROP_DEFAULTS, cropRect, cropRecord, choicesFor, reviewOrder, reviewStats, exportFiles, cropsToDrop } from './crops.js';
 import { makeZip } from './zip.js';
 import { AskPolicy, ASK_DEFAULTS, askChoices, digitParts } from './ask.js';
-import { DigitMemory, lessonsOf } from './vision/learn.js';
+import { DigitMemory, lessonsOf, mergeLooks } from './vision/learn.js';
+import { SEED_LOOKS, SEED_ABOUT } from './vision/seed-looks.js';
 import { TeachPolicy, TeachStore, TEACH_DEFAULTS, teachRect, viewPicture, readingOf, nextBatch, staleRecords, batchFiles, batchPath, batchSummary, teachUsage, teachToDrop, GitHubSink, parseRepo } from './teach.js';
 
-export const VERSION = '0.7.1';
+export const VERSION = '0.8.0';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -697,8 +698,9 @@ function renderReviewStats(list) {
   if (s.answered) lines.push(`Answered while filming: ${s.answered}`);
   const m = memory.stats();
   if (m.looks) lines.push(`Learned from your answers: ${m.used ? `${m.used} digit shape${m.used > 1 ? 's' : ''} in use` : 'nothing in use yet'} (${m.looks} seen, from ${m.answers} answer${m.answers === 1 ? '' : 's'})${settings.learnLooks === false ? ', but learning is off in Settings' : ''}`);
+  if (settings.seedLooks !== false && SEED_ABOUT.looks) lines.push(`Built in: ${SEED_ABOUT.looks} digit shapes learned from ${SEED_ABOUT.pictures} labelled pictures of the display (${SEED_ABOUT.made})`);
   const T = review.test;
-  if (T) lines.push(`Reader test on ${T.n} labelled pictures: ${T.ok} read right, ${T.none} not read, ${T.wrong} misread${T.learned ? ' (with what it learned from you)' : ''}`);
+  if (T) lines.push(`Reader test on ${T.n} labelled pictures: ${T.ok} read right, ${T.none} not read, ${T.wrong} misread${T.learned ? ' (with the digit shapes it learned)' : ''}`);
   if (review.full) lines.push(`Storage full (${CROP_DEFAULTS.maxCrops} pictures, all labelled): export them, then delete them to keep collecting.`);
   $('reviewStats').textContent = lines.join('\n');
   $('btnForgetLearned').hidden = !m.looks;
@@ -820,8 +822,17 @@ function saveMemory() {
   try { localStorage.setItem(LEARN_KEY, JSON.stringify(memory)); } catch (e) { console.warn('what was learned is not saved', e); }
 }
 
-// the looks the reader uses (none while learning is off)
-const learnedLooks = () => (settings.learnLooks === false ? null : memory.active());
+// the looks the reader uses: what it learned from the person (unless learning is off) and
+// the ones the app comes with, learned from labelled pictures of the display (seed-looks.js;
+// unless turned off for another display)
+let merged = null, mergedFrom = null;
+function learnedLooks() {
+  const mine = settings.learnLooks === false ? null : memory.active();
+  if (settings.seedLooks === false) return mine;
+  if (!mine) return SEED_LOOKS;
+  if (mergedFrom !== mine) { merged = mergeLooks(SEED_LOOKS, mine); mergedFrom = mine; }
+  return merged;
+}
 
 // learn from a reading (or a crop's record) the person said showed v; returns what
 // memory.unlearn() needs to take it back
@@ -1027,7 +1038,7 @@ function teachAbout() {
   return {
     version: VERSION, device: deviceId(),
     display: { minKg: +settings.minKg, maxKg: +settings.maxKg, stepKg: +settings.stepKg, multiplier: +settings.multiplier },
-    reader: { colorMode: settings.colorMode, strictness: +settings.strictness, resolution: settings.resolution, lowPower: !!settings.lowPower, learned: memory.stats() },
+    reader: { colorMode: settings.colorMode, strictness: +settings.strictness, resolution: settings.resolution, lowPower: !!settings.lowPower, learned: memory.stats(), seed: settings.seedLooks === false ? null : SEED_ABOUT },
   };
 }
 
@@ -1865,7 +1876,7 @@ async function openSession(id) {
     if (g.peak60KgMin != null) statRow(t2, 'Highest 60 s rate', `${fmtInt(g.peak60KgMin)} kg/min`);
     if (g.pctFast != null) statRow(t2, 'Time fast / on target / slow', `${g.pctFast}% / ${g.pctOk}% / ${g.pctSlow}%`);
     statRow(t2, 'Touches', g.touches ? `${g.touches} (${g.touchSec} s)` : '0');
-    if (g.openEnd) statRow(t2, 'Note', 'recording ended before the weight settled');
+    if (g.openEnd) statRow(t2, 'Note', 'the weight was not seen settling after this tap (recording ended or display out of view): mass and rate up to the last reading');
     if (g.partialStart) statRow(t2, 'Note', 'recording started mid-tap');
     c.append(h, t2);
     body.appendChild(c);
