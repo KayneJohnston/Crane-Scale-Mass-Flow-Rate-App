@@ -16,7 +16,7 @@ import { robustSlope, hingeOnset, hingeStop, median, lowerBound } from './stats.
 import { smoothRate, rateVarToS } from './kalman.js';
 
 // bump when the analysis changes, so saved taps are analysed again
-export const ANALYSIS_VERSION = 5;
+export const ANALYSIS_VERSION = 6;
 
 export const OFFLINE_DEFAULTS = {
   onKgMin: 150,
@@ -27,6 +27,8 @@ export const OFFLINE_DEFAULTS = {
   halfWin: 15,
   levelWin: 20,
   edgeSec: 5,          // time in band: leave out the first and last seconds of a tap
+  unseenEndSec: 180,   // out of view as a tap ended: the level after it from readings this soon after
+  settleDropKg: 400,   // ... at most this much lower (the metal in the tapping tube going back to the pot)
 };
 
 const ACCEPTED = new Set([0, 1, 2]);
@@ -114,11 +116,16 @@ export function analyseSession(sess, opts = {}) {
   if (!runs.length && sess.segments?.length) runs = sess.segments.map((s) => [s.onset, s.end ?? t[n - 1]]);
 
   const touches = (sess.events || []).filter((e) => e.type === 'touch-end');
+  // where the weight settled lower and stayed (the engine's judgement, engine.js): at the
+  // end of a tap, the vacuum released and the metal in the tapping tube went back to the pot
+  const releases = (sess.events || []).filter((e) => e.type === 'relevel' && e.drop >= 100 && e.drop <= o.settleDropKg);
   const Sq = rateVarToS(cfg.rateVar ?? 100);
   const curves = [];
   // where the last tap kept ended: the next one never starts before it (its metal
   // would be counted twice)
   let lastEnd = -Infinity;
+  // ... and from when the weight had settled after it (its tube emptied back to the pot)
+  let lastSettled = -Infinity;
   for (let k = 0; k < runs.length; k++) {
     const [rs, re] = runs[k];
     // (never reaching into the previous or the next tap)
@@ -127,17 +134,24 @@ export function analyseSession(sess, opts = {}) {
     let a0 = lowerBound(t, Math.max(prevEnd, rs - 45)), a1 = lowerBound(t, Math.min(re, rs + 40));
     const hOn = hingeOnset(t.slice(a0, a1), z.slice(a0, a1), { minTail: 3 });
     let onset = hOn ? hOn.tau : rs - o.halfWin / 2;
-    // refine the end: rising-then-flat change point
+    // refine the end: rising-then-flat change point - before the vacuum was released, if
+    // it was then (the drop would pull the change point early)
     a0 = lowerBound(t, Math.max(onset + 5, re - 40)); a1 = lowerBound(t, Math.min(nextStart, re + 45));
+    const rel = releases.find((e) => e.t > onset + 10 && e.t >= t[a0] && e.t < Math.min(nextStart, re + 45));
+    if (rel) a1 = Math.min(a1, lowerBound(t, rel.t));
     const hOff = hingeStop(t.slice(a0, a1), z.slice(a0, a1), { minHead: 3 });
     let end = hOff ? hOff.tau : re + o.halfWin / 2;
+    if (rel) end = Math.min(end, rel.t);
     onset = Math.max(t[0], prevEnd, onset); end = Math.min(t[n - 1], Math.max(end, onset + 1));
+    // (the level after it: once the metal in the tube has gone back to the pot)
+    const settleFrom = rel ? Math.max(end, rel.t) + 3 : end + 0.5;
     // levels before / after
     const lvl = (from, to) => {
       const i0 = lowerBound(t, from), i1 = lowerBound(t, to);
       return i1 - i0 >= 6 ? { v: median(z.slice(i0, i1)), n: i1 - i0 } : null;
     };
-    let before = lvl(Math.max(prevEnd, onset - o.levelWin), onset - 0.5);
+    const from = Math.max(prevEnd, lastSettled);
+    let before = lvl(Math.max(from, onset - o.levelWin), onset - 0.5);
     // The display was out of view shortly before the tap (e.g. the crane moving to this
     // pot): the level the crucible was left at before that. Only this tap can have added
     // metal since, whether it started while the display was out of view or after.
@@ -145,11 +159,34 @@ export function analyseSession(sess, opts = {}) {
       const [g0, g1] = blind[b];
       if (g0 > onset + 0.01 || g1 < onset - o.levelWin) continue;
       const i = lowerBound(t, g0 + 0.01) - 1;
-      if (g0 >= prevEnd && i >= 0) before = lvl(Math.max(prevEnd, g0 - o.levelWin), g0 + 0.01) || { v: z[i], n: 1 };
+      if (g0 >= prevEnd && i >= 0) before = lvl(Math.max(from, g0 - o.levelWin), g0 + 0.01) || { v: z[i], n: 1 };
       break;
     }
-    const after = lvl(end + 0.5, Math.min(nextStart, end + o.levelWin));
+    let after = lvl(settleFrom, Math.min(nextStart, settleFrom + o.levelWin));
+    if (!after && rel) {
+      // seen only briefly once the tube had emptied (out of view soon after, or the next
+      // pot under way): those readings, rather than ones from before the release
+      const i0 = lowerBound(t, rel.t + 1), i1 = Math.min(lowerBound(t, nextStart), i0 + 2 * o.levelWin);
+      if (i1 - i0 >= 2 && t[i0] - end <= o.unseenEndSec) after = { v: median(z.slice(i0, i1)), n: i1 - i0 };
+    }
     const levelBefore = before ? before.v : hOn ? hOn.a : z[lowerBound(t, onset)];
+    if (!after) {
+      // Out of view as the tap ended (the crane may have moved off meanwhile): the level
+      // the weight is next seen settled at, before the next tap - the metal tapped
+      // meanwhile counts. The tap ends when that much more would have flowed at its last
+      // rate (or with the last reading, if the weight is lower: the metal in the tapping
+      // tube went back to the pot).
+      const i = lowerBound(t, end + 0.5), k = lowerBound(t, end + 0.01);
+      const later = i < n && t[i] < nextStart && t[i] - end <= o.unseenEndSec ? lvl(t[i], Math.min(nextStart, t[i] + o.levelWin)) : null;
+      if (later && k > 0 && t[k - 1] > onset) {
+        const lastT = t[k - 1], last = median(z.slice(lowerBound(t, lastT - 5), k));
+        const f = slope30(lastT - o.halfWin), rate = f && f.slope > 0 ? f.slope : (last - levelBefore) / (lastT - onset);
+        if (later.v >= last - o.settleDropKg && rate > 0) {
+          after = later;
+          end = later.v > last ? Math.min(t[i], lastT + (later.v - last) / rate) : lastT;
+        }
+      }
+    }
     let levelAfter, openEnd = false;
     if (after) levelAfter = after.v;
     else {
@@ -165,6 +202,7 @@ export function analyseSession(sess, opts = {}) {
     const dt = end - onset, dm = levelAfter - levelBefore;
     if (!(dt >= o.minSegSec && dm >= o.minSegKg)) continue;
     lastEnd = end;
+    lastSettled = rel ? settleFrom : -Infinity;
     const avg = (dm / dt) * 60;
     // uncertainty: level medians (n_eff ~ n/3 for correlated readings) and +/-1 s timing at each end
     const sig = Math.max(sigmaFloor, sess.noiseSigma || 30);

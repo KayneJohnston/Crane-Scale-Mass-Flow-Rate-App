@@ -4,8 +4,10 @@
 // operator, with a random wander. The display shows that mass plus load swing
 // and sensor noise, rounded to 50 kg, refreshed a few times per second.
 // "Touch" events (crucible resting on the cathode/cell) pull the reading down
-// with a bounce until the crane lifts it. The camera reader occasionally fails
-// (null) or misreads a digit.
+// with a bounce until the crane lifts it. With `column`, the reading also includes
+// the metal held up in the tapping tube while the vacuum is on: it builds up before
+// the metal flows and goes back to the pot when the tap ends. The camera reader
+// occasionally fails (null) or misreads a digit.
 
 import { mulberry32 } from '../vision/render7seg.js';
 
@@ -21,6 +23,9 @@ export const SIM_DEFAULTS = {
   taps: null,               // e.g. [{mass: 3600}, {mass: 3400, rate0: 800}] for a multi-pot crucible
   gapSec: 70,               // pause between taps (crane moving to the next pot)
   touches: 2, touchDepth: [300, 1500], touchDur: [3, 9],
+  touchHold: false,         // a touch on something solid: the reading stays where it was while metal flows in
+  column: 0,                // kg of metal held up in the tapping tube while the vacuum is on ...
+  buildSec: 30,             // ... building up over this long before the metal flows
   noise: 22,                // kg white noise per display update
   swingAmp: 30, swingPeriod: 4.3,
   displayHz: 4,
@@ -104,6 +109,8 @@ export class TapSimulator {
       if (x < 0) continue;
       if (x <= T.dur) {
         e -= T.depth * (1 - Math.exp(-x / 0.4)) * (1 + 0.25 * Math.sin((2 * Math.PI * x) / 1.3 + T.ph) * Math.exp(-x / 4));
+        // (resting on something solid, the metal flowing in meanwhile is held up by it too)
+        if (this.o.touchHold) e -= this.trueMass(t) - this.trueMass(T.start);
       } else if (x <= T.dur + 3) {
         const y = x - T.dur;
         e -= T.depth * Math.exp(-y / 0.25);
@@ -114,6 +121,18 @@ export class TapSimulator {
   }
 
   inTouch(t) { return this.touches.some((T) => t >= T.start && t <= T.start + T.dur + 1); }
+
+  // the metal held up in the tapping tube (kg): builds up before each tap, goes back when it ends
+  columnEffect(t) {
+    const { column: c, buildSec: b } = this.o;
+    if (!c) return 0;
+    for (const T of this.tapList) {
+      if (t >= T.start - b && t < T.start) return (c * (t - (T.start - b))) / b;
+      if (t >= T.start && t <= T.end) return c;
+      if (t > T.end && t < T.end + 2) return c * (1 - (t - T.end) / 2);
+    }
+    return 0;
+  }
 
   /** Value shown on the scale display at time t. */
   displayValue(t) {
@@ -127,7 +146,7 @@ export class TapSimulator {
     const td = k / o.displayHz;
     const r = mulberry32((o.seed * 7919) ^ (k * 2654435761));
     const noise = o.noise * gaussOf(r) + o.swingAmp * Math.sin((2 * Math.PI * td) / o.swingPeriod + this.swingPh);
-    const v = this.trueMass(td) + this.touchEffect(td) + noise;
+    const v = this.trueMass(td) + this.touchEffect(td) + this.columnEffect(td) + noise;
     return Math.round(v / o.stepKg) * o.stepKg;
   }
 

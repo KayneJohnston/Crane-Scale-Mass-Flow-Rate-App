@@ -99,6 +99,153 @@ test('a standard crucible (three pots, 1.5-2.5 min pot changes, display lost whi
   }
 });
 
+// --------------------------------------------- pot changes are not touches --
+
+// A crucible filled from three pots (100 s pot changes), run frame by frame through a
+// fresh engine. lost: the display out of view while the crane moves; frame(sim, t):
+// what the camera reads instead of the simulator (or undefined).
+function crucible(seed, simOpts = {}, { lost = false, frame = null } = {}) {
+  const sim = new TapSimulator({ seed, startMass: 16000, taps: [{ mass: 3500 }, { mass: 3500, rate0: 900 }, { mass: 2000, rate0: 800 }], gapSec: 100, ...simOpts });
+  const moving = lost ? sim.tapList.slice(0, -1).map((tp) => [tp.end + 5, tp.end + 65]) : [];
+  const ended = [];
+  const eng = new TapEngine({}, { onSessionEnd: (s) => ended.push(s) });
+  for (let t = 0; t < sim.duration + 5; t += 0.1) {
+    const f = moving.some(([a, b]) => t >= a && t < b) ? { value: null } : frame?.(sim, t) ?? sim.frame(t);
+    eng.pushFrame(t, W0 + t * 1000, f.value, f.conf ?? 1);
+  }
+  if (eng.sess) ended.push(eng.endSession('manual'));
+  return { sim, eng, ended };
+}
+
+test('a pot change is not a touch: the weight settles lower when the vacuum is released', () => {
+  // At the end of each pot the metal in the tapping tube goes back to the pot, and the
+  // reading stays 150-300 kg lower while the crane moves to the next one (in view here).
+  // On a real recording that showed as touches of 40 s and 3 min, and a recording could
+  // end after a minute of one.
+  for (const [seed, column] of [[1, 150], [2, 250], [3, 300]]) {
+    const { sim, ended } = crucible(seed, { column, touches: 0 });
+    const tag = `seed ${seed}, ${column} kg in the tube`;
+    assert.equal(ended.length, 1, tag);
+    const s = ended[0];
+    assert.equal(s.endReason, 'stall', tag);
+    assert.equal(s.touchCount, 0, tag);
+    assert.ok(!s.events.some((e) => e.type === 'touch'), tag);
+    // the readings while the crane moves are the weight, not rejected
+    const T0 = (s.wall0 - W0) / 1000;
+    const moving = s.meas.filter((r) => sim.tapList.slice(0, -1).some((tp) => r.t + T0 > tp.end + 3 && r.t + T0 < tp.end + 60));
+    const low = moving.filter((r) => r.f === FLAG_CODES.low).length;
+    assert.ok(moving.length > 150 && low / moving.length < 0.05, `${tag}: ${low} of ${moving.length} rejected`);
+    assert.equal(analyseSession(s).segments.length, 3, tag);
+  }
+});
+
+test('touches are found at the same time, and none invented', () => {
+  // the simulator's touches (300-1500 kg, 3-9 s), also with the metal in the tube going
+  // back at each pot change and the display lost while moving: touches that overlap
+  // count as one
+  for (const [seed, column, lost] of [[4, 0, false], [5, 200, false], [6, 300, true]]) {
+    const { sim, ended } = crucible(seed, { column }, { lost });
+    const s = ended[0], T0 = (s.wall0 - W0) / 1000;
+    const tag = `seed ${seed}, ${column} kg in the tube${lost ? ', display lost while moving' : ''}`;
+    assert.equal(ended.length, 1, tag);
+    const found = s.events.filter((e) => e.type === 'touch-end').map((e) => [e.t + T0 - e.dur, e.t + T0]);
+    const real = sim.touches.map((T) => [T.start, T.start + T.dur]);
+    for (const [a, b] of found) assert.ok(real.some(([x, y]) => a <= y + 2 && b >= x - 1), `${tag}: a touch at ${a.toFixed(0)}-${b.toFixed(0)} s that wasn't`);
+    for (const [x, y] of real) assert.ok(found.some(([a, b]) => a <= y + 2 && b >= x - 1), `${tag}: the touch at ${x.toFixed(0)}-${y.toFixed(0)} s missed`);
+    assert.equal(s.touchCount, found.length, tag);
+  }
+});
+
+test('a long touch on something solid is a touch, although the reading holds steady', () => {
+  // Resting on the cell, the reading stays put while metal flows in, then jumps up when
+  // the crucible is lifted. For the first 30 s it looks like a pot change.
+  for (const seed of [1, 2]) {
+    const { sim, ended } = runSim(seed, { touches: 1, touchHold: true, touchDepth: [300, 300], touchDur: [30, 30] });
+    const s = ended[0];
+    assert.equal(ended.length, 1);
+    assert.equal(s.touchCount, 1, `seed ${seed}`);
+    const e = s.events.find((x) => x.type === 'touch-end');
+    assert.ok(Math.abs(e.dur - 30) < 3, `seed ${seed}: ${e.dur} s`);
+    const a = analyseSession(s);
+    assert.equal(a.segments.length, 1, `seed ${seed}`);
+    assert.ok(Math.abs(a.segments[0].massKg - 3600) < 80, `seed ${seed}: mass ${a.segments[0].massKg}`);
+    assert.ok(Math.abs(a.segments[0].avgKgMin - sim.trueAvgRate) / sim.trueAvgRate < 0.03, `seed ${seed}: avg ${a.segments[0].avgKgMin} vs ${sim.trueAvgRate}`);
+  }
+});
+
+test('back in view with a few readings far too high: the readings after them are no touch', () => {
+  // From a real recording: back in view after the crane moved to the next pot, the first
+  // 4 s of readings were ~800 kg too high, and the minute of right ones after them was
+  // taken for a touch (one more second and it would have ended the recording).
+  for (const seed of [1, 2, 3]) {
+    let back = null;
+    const { sim, ended } = crucible(seed, { touches: 0 }, {
+      lost: true,
+      frame: (sim, t) => {
+        back ??= sim.tapList[0].end + 65;
+        if (t >= back && t < back + 4) return { value: sim.displayValue(t) + 800 };
+      },
+    });
+    const s = ended[0];
+    assert.equal(ended.length, 1, `seed ${seed}`);
+    assert.equal(s.touchCount, 0, `seed ${seed}: ${JSON.stringify(s.events.filter((e) => e.type === 'touch-end'))}`);
+    const a = analyseSession(s);
+    assert.equal(a.segments.length, 3, `seed ${seed}`);
+    a.segments.forEach((g, i) => assert.ok(Math.abs(g.massKg - sim.tapList[i].mass) < 100, `seed ${seed}, pot ${i + 1}: ${g.massKg} kg`));
+  }
+});
+
+test('a touch just after the display is back in view is still a touch', () => {
+  // the other way round from the readings far too high: the right ones first, then a
+  // touch - while metal flowed during the spell out of view (mid-tap), or not (a pot change)
+  for (const [seed, midTap, delay, depth] of [[4, true, 2, 500], [5, true, 4, 400], [2, false, 3, 300]]) {
+    let g0, g1;
+    const { sim, ended } = crucible(seed, { touches: 0 }, {
+      frame: (sim, t) => {
+        const tp = sim.tapList[0];
+        if (g0 == null) [g0, g1] = midTap ? [tp.start + 120, tp.start + 160] : [tp.end + 5, tp.end + 65];
+        if (t >= g0 && t < g1) return { value: null };
+        if (t >= g1 + delay && t < g1 + delay + 6) return { value: sim.frame(t).value == null ? null : sim.displayValue(t) - depth };
+      },
+    });
+    const s = ended[0], T0 = (s.wall0 - W0) / 1000, tag = `seed ${seed}, ${depth} kg ${delay} s after back in view${midTap ? ', mid-tap' : ''}`;
+    assert.equal(ended.length, 1, tag);
+    const found = s.events.filter((e) => e.type === 'touch-end').map((e) => [e.t + T0 - e.dur, e.t + T0]);
+    assert.equal(found.length, 1, `${tag}: ${JSON.stringify(found)}`);
+    assert.ok(found[0][0] <= g1 + delay + 6 && found[0][1] >= g1 + delay, `${tag}: ${found[0].map((x) => x.toFixed(0))}`);
+    const a = analyseSession(s);
+    assert.equal(a.segments.length, 3, tag);
+    a.segments.forEach((g, i) => assert.ok(Math.abs(g.massKg - sim.tapList[i].mass) < 100, `${tag}, pot ${i + 1}: ${g.massKg} kg`));
+  }
+});
+
+test('a touch is counted once when the flow restarts and its readings are judged again', () => {
+  // From a real recording: a touch while the metal had stopped, then the flow found to
+  // have resumed from before it - the touch was counted twice
+  const sim = new TapSimulator({ seed: 3, startMass: 16000, taps: [{ mass: 2000 }, { mass: 2000 }], gapSec: 70, touches: 0 });
+  const e1 = sim.tapList[0].end;
+  const eng = new TapEngine({});
+  for (let t = 0; t < e1 + 45; t += 0.1) {
+    const f = sim.frame(t);
+    eng.pushFrame(t, W0 + t * 1000, f.value == null || t < e1 + 30 || t > e1 + 33 ? f.value : f.value - 400, 1);
+  }
+  const S = eng.sess;
+  assert.ok(S && !S.flowing, 'the flow has stopped');
+  assert.equal(S.touchCount, 1);
+  eng.flowStart(e1 + 20 - S.T0, { a: eng.levelAt(e1 + 20 - S.T0) ?? S.kf.m, b: 0, seB: 1 });
+  assert.equal(S.touchCount, 1);
+  assert.equal(S.events.filter((e) => e.type === 'touch-end').length, 1);
+  assert.equal(S.events.filter((e) => e.type === 'touch').length, 1);
+});
+
+test('a crucible set down after the last pot still ends the recording', () => {
+  const { ended } = crucible(1, { touches: 0, taps: [{ mass: 3000 }] }, {
+    frame: (sim, t) => (t > sim.tapList[0].end + 30 ? { value: sim.displayValue(t) - 6000 } : undefined),
+  });
+  assert.equal(ended.length, 1);
+  assert.equal(ended[0].endReason, 'low');
+});
+
 test('a slow tap on a steady display that holds its value for seconds (as on the real scale)', () => {
   // From a real recording: no flicker, each value held for up to ~15 s, and a tap that
   // started at ~250 kg/min. The display then sits on one value for 10-15 s while metal
@@ -244,19 +391,30 @@ function savedSession(dur, weight, seen = () => true, flag = () => 1) {
 }
 const ramp = (t0, t1, kgMin) => (t) => (Math.max(0, Math.min(t, t1) - t0) * kgMin) / 60;
 
-test('a tap whose end was out of view still counts, up to the last reading', () => {
-  // From a real recording: the display went out of view near the end of a tap, came
-  // back for a few readings, and then the crucible rested on something for minutes.
-  // The level after the tap came from no readings at all, and the total was blank.
-  const s = savedSession(500, (t) => 19000 + ramp(60, 320, 600)(t) - (t >= 345 ? 250 : 0), (t) => t < 300 || t >= 340, (t) => (t >= 345 ? 3 : 1));
-  const a = analyseSession(s);
-  assert.equal(a.segments.length, 1);
-  const g = a.segments[0];
-  assert.equal(g.openEnd, true);
-  assert.ok(g.end <= 300, `ends at the last reading before the gap (${g.end})`);
-  assert.ok(Math.abs(g.massKg - 2400) <= 100, `mass ${g.massKg}`);
-  assert.ok(Math.abs(g.avgKgMin - 600) <= 30, `avg ${g.avgKgMin}`);
-  assert.ok(Number.isFinite(a.totals.massKg) && Number.isFinite(a.totals.avgKgMin));
+test('a tap whose end was out of view still counts', () => {
+  // From a real recording: the display went out of view near the end of a tap and came
+  // back with the weight settled. The level after the tap is the one it is next seen at
+  // (the metal tapped meanwhile counts), and the tap ends when that would have flowed.
+  const w = (t) => 19000 + ramp(60, 320, 600)(t);
+  for (const [what, flag] of [['settled', () => 1], ['settled, then resting on something', (t) => (t >= 345 ? 3 : 1)]]) {
+    const a = analyseSession(savedSession(500, (t) => w(t) - (what !== 'settled' && t >= 345 ? 250 : 0), (t) => t < 300 || t >= 340, flag));
+    assert.equal(a.segments.length, 1, what);
+    const g = a.segments[0];
+    assert.equal(g.openEnd, false, what);
+    assert.ok(Math.abs(g.massKg - 2600) <= 100, `${what}: mass ${g.massKg}`);
+    assert.ok(Math.abs(g.end - 320) <= 15, `${what}: end ${g.end}`);
+    assert.ok(Math.abs(g.avgKgMin - 600) <= 30, `${what}: avg ${g.avgKgMin}`);
+  }
+  // Not seen again (the recording ended): up to the last reading. (The level after the
+  // tap once came from no readings at all, and the total was blank.)
+  const b = analyseSession(savedSession(330, w, (t) => t < 300));
+  assert.equal(b.segments.length, 1);
+  const h = b.segments[0];
+  assert.equal(h.openEnd, true);
+  assert.ok(h.end <= 300, `ends at the last reading (${h.end})`);
+  assert.ok(Math.abs(h.massKg - 2400) <= 100, `mass ${h.massKg}`);
+  assert.ok(Math.abs(h.avgKgMin - 600) <= 30, `avg ${h.avgKgMin}`);
+  assert.ok(Number.isFinite(b.totals.massKg) && Number.isFinite(b.totals.avgKgMin));
 });
 
 test('taps never overlap, so no metal is counted twice', () => {

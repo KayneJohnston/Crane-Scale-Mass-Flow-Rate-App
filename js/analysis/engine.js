@@ -6,7 +6,9 @@
 //     -> robust constant-rate Kalman filter (kalman.js) with physically motivated
 //        outlier handling: the crucible cannot lose metal, so readings well below
 //        the mass already established are "touch/support" events (crucible resting
-//        on the cell) and are excluded; implausible upward jumps are excluded too.
+//        on the cell) and are excluded - unless they turn out to be the weight (see
+//        touchStep: a pot change is not a touch); implausible upward jumps are
+//        excluded too.
 //     -> Theil–Sen slopes over fixed windows (20/40/60/120 s) of accepted points
 //     -> flow on/off detection, auto start/stop, target comparison.
 //
@@ -46,8 +48,17 @@ export const ENGINE_DEFAULTS = {
   stallSec: 180,           // end when the weight has not risen ...
   stallRiseKg: 100,        // ... by this much over stallSec
   lostSec: 180,            // end after this long without any valid reading
-  longLowSec: 60,          // "touch" lasting longer than this ends the session
+  longLowSec: 60,          // a deep "touch" lasting longer than this ends the session
   touchMinKg: 120,         // smallest drop reported as a touch event
+  // A touch is judged when the readings come back (touchStep). At the end of a pot the
+  // vacuum is released and the metal in the tapping tube goes back to the pot: the
+  // weight settles 100-300 kg lower and stays there while the crane moves to the next
+  // pot. That is not a touch.
+  touchBackSec: 1,         // judged once the readings have been back this long
+  rampKg: 125,             // back within this of the readings just before: they rose into it - the weight
+  relevelMaxKg: 400,       // never seen to come back: a steady level at most this far down is the weight
+  relevelSec: 20,          // ... or held this long, steady and not rising: the weight (not judged later)
+  touchGapSec: 3,          // out of view longer than this during a touch: not counted in its time
   noSignalSec: 3,
   // robust Kalman gating
   gateLow: 3.5,
@@ -57,6 +68,8 @@ export const ENGINE_DEFAULTS = {
   reinitHighN: 8,
   reinitSlowN: 7,          // of the last 10 accepted points
   blindSec: 15,            // no reading at all for this long: the flow may have stopped or changed
+  settleSec: 10,           // ... and the first readings back may be off: lower ones within this long after are
+  settleRelevelSec: 5,     // ... the weight once they have held a steady line this long (touchStep)
   // display
   warmupSec: 12,
   maxRelSd: 0.15,
@@ -68,7 +81,7 @@ export const FLAG_CODES = { pre: 0, ok: 1, slow: 2, low: 3, high: 4 };
 
 // Bump when the live processing changes in a way that affects saved results: older
 // recordings are then re-run from their raw camera frames (reprocessSession).
-export const ENGINE_VERSION = 2;
+export const ENGINE_VERSION = 3;
 export const STATUS_CODES = { noflow: 0, measuring: 1, ok: 2, fast: 3, slow: 4, stopping: 5 };
 
 function makeId(wallMs) {
@@ -265,12 +278,17 @@ export class TapEngine {
 
   kfProcess(rec) {
     const S = this.sess, c = this.cfg, kf = S.kf;
-    const floor = this.floorFor(rec);
     // After a spell with no readings at all (e.g. the crane moving to the next pot), the
     // flow may have stopped or changed meanwhile: the rate carried across the gap is
     // uncertain by about half its value, so the filter re-locks onto the new readings.
     const prev = S.meas[rec.i - 1];
-    if (prev && rec.t - prev.t > c.blindSec) kf.Pqq += (kf.q / 2) ** 2;
+    if (prev && rec.t - prev.t > c.blindSec) {
+      kf.Pqq += (kf.q / 2) ** 2;
+      // (the level before: lower readings just after this one may be the weight, touchStep)
+      const A = S.acc, k1 = lowerBound(A.t, rec.t), k0 = Math.max(0, k1 - 5);
+      S.back = k1 > k0 ? { t: rec.t, level: median(A.z.slice(k0, k1)) } : null;
+    }
+    const floor = this.floorFor(rec);
     kf.predict(rec.t);
     const R = S.R;
     const sd = Math.sqrt(kf.Pmm + R);
@@ -291,29 +309,201 @@ export class TapEngine {
     rec.m = kf.m; rec.q = kf.q; rec.qsd = Math.sqrt(kf.Pqq);
     S.lowRun = flag === 'low' ? S.lowRun + 1 : 0;
     S.highRun = flag === 'high' ? S.highRun + 1 : 0;
+    let lifted = null;
     if (flag === 'ok' || flag === 'slow') {
       S.slowHist.push(flag === 'slow' ? 1 : 0);
       if (S.slowHist.length > 10) S.slowHist.shift();
-      S.acc.t.push(rec.t); S.acc.z.push(rec.z);
-    }
-    // touch / support bookkeeping
-    if (flag === 'low') {
-      if (!S.touch) S.touch = { start: rec.t, depth: 0, reported: false };
-      S.touch.depth = Math.max(S.touch.depth, S.floorM - rec.z);
-      if (!S.touch.reported && S.lowRun >= 2 && S.touch.depth >= c.touchMinKg) { S.touch.reported = true; this.event('touch', {}, S.touch.start); }
-    } else if (S.touch && flag !== 'high') {
-      if (S.touch.reported) {
-        const dur = rec.t - S.touch.start;
-        S.touchCount++; S.touchTime += dur;
-        this.event('touch-end', { dur: r1(dur), depth: Math.round(S.touch.depth) }, rec.t);
+      // Back at the level before one taken for the weight (relevel): with a jump, the
+      // crucible was lifted off what it rested on - a touch after all; risen into it,
+      // what was taken for the weight was (the metal flows again, or flowed while the
+      // display was out of view).
+      const L = S.relevelled, A = S.acc, k = A.t.length;
+      if (L && rec.z >= L.T.ref - c.rampKg) {
+        const jump = k && prev && rec.t - prev.t <= c.touchGapSec && rec.z - median(A.z.slice(Math.max(0, k - 5))) > c.rampKg;
+        if (jump) lifted = L; else S.relevelled = null;
       }
-      S.touch = null;
+      if (!lifted) { A.t.push(rec.t); A.z.push(rec.z); }
     }
+    if (lifted) {
+      this.untouch(lifted, rec);
+      S.acc.t.push(rec.t); S.acc.z.push(rec.z);
+      this.restartFilter(rec);
+    }
+    this.touchStep(rec, flag);
     if (S.highRun >= c.reinitHighN) this.tryReinit('high', rec);
     else if (S.slowHist.length >= 10 && S.slowHist.reduce((a, b) => a + b, 0) >= c.reinitSlowN) this.tryReinit('slow', rec);
-    if (!this.replaying && S.touch && rec.t - S.touch.start > c.longLowSec && c.autoStop) {
+    // (a shallow one may be a pot change: see touchStep)
+    const T = S.touch;
+    if (!this.replaying && T && T.depth > c.relevelMaxKg && T.dur + rec.t - T.last > c.longLowSec && c.autoStop) {
       this.endSession('low', S.T0 + S.floorT);
     }
+  }
+
+  /**
+   * Touch / support bookkeeping. A touch starts with readings below what the crucible
+   * already holds, and is judged when they come back:
+   *   - up with a jump to the old level (the crucible lifted off what it rested on, with
+   *     the metal that flowed in meanwhile): a touch;
+   *   - rising into the old level from just below: the lower readings were the weight -
+   *     the metal in the tapping tube went back to the pot when the vacuum was released
+   *     at the end of a pot, the crane moved to the next one and the metal flows again;
+   *     or the old level came from a few wrong readings just after the display was out
+   *     of view. They are accepted after all, and there was no touch (relevel).
+   * Not seen coming back (out of view first, or the recording ends), or held for
+   * relevelSec without rising: a steady level at most relevelMaxKg down is the weight
+   * too. Just back in view after a spell out of it (the crane may still be moving or
+   * swinging, and the first readings back can be well off): readings below them that
+   * hold a steady line for settleRelevelSec are the weight, if not more than
+   * relevelMaxKg below the level before the spell. Either way, if the readings then jump
+   * back up to the old level, it was a touch after all (tryReinit). Anything else is a
+   * touch. Time out of view is not part of a touch.
+   */
+  touchStep(rec, flag) {
+    const S = this.sess, c = this.cfg, T = S.touch;
+    if (flag === 'low') {
+      if (!T) {
+        const G = S.back, settling = !!G && rec.t - G.t < c.settleSec;
+        S.touch = { start: rec.t, i0: rec.i, last: rec.t, dur: 0, depth: 0, ref: S.floorM, reported: false, back: null, before: settling ? G.level : null };
+      }
+      else {
+        T.dur += rec.t - T.last <= c.touchGapSec ? rec.t - T.last : c.binSec;
+        T.last = rec.t; T.back = null;
+      }
+      const U = S.touch;
+      U.depth = Math.max(U.depth, S.floorM - rec.z);
+      if (!U.reported && S.lowRun >= 2 && U.depth >= c.touchMinKg) { U.reported = true; this.event('touch', {}, U.start); }
+      if ((U.dur >= c.relevelSec && this.steadyLevel(U, rec)) || (U.before != null && U.dur >= c.settleRelevelSec && this.steadyLine(U, rec))) this.closeTouch(rec, null, true);
+      return;
+    }
+    if (!T || flag === 'high') return;
+    const B = (T.back ||= { t: rec.t, z: [] });
+    B.z.push(rec.z);
+    if (rec.t - B.t < c.touchBackSec) return;
+    this.closeTouch(rec, B.t - T.last <= c.touchGapSec ? median(B.z) : null);
+  }
+
+  // the touch's readings of the last relevelSec: a steady level, not rising, at most
+  // relevelMaxKg down
+  steadyLevel(T, rec) {
+    const S = this.sess, c = this.cfg, M = S.meas;
+    const t = [], z = [];
+    for (let i = rec.i; i >= T.i0 && M[i].t >= rec.t - c.relevelSec; i--) if (M[i].flag === 'low') { t.unshift(M[i].t); z.unshift(M[i].z); }
+    if (t.length < (0.5 * c.relevelSec) / c.binSec) return false;
+    const zs = [...z].sort((a, b) => a - b), q = (p) => zs[Math.min(zs.length - 1, Math.floor(p * zs.length))];
+    if (q(0.9) - q(0.1) > 3 * c.stepKg || T.ref - median(z) > c.relevelMaxKg) return false;
+    const f = robustSlope(t, z, 0, t.length, { sigmaFloor: this.sigmaFloor });
+    return !!f && Math.abs(f.slope * 60) < c.flowOffKgMin;
+  }
+
+  // just back in view: the touch's readings of the last settleRelevelSec hold a steady
+  // line (flat, or rising as metal flows), not more than relevelMaxKg below the level
+  // before the spell out of view
+  steadyLine(T, rec) {
+    const S = this.sess, c = this.cfg, M = S.meas;
+    const t = [], z = [];
+    for (let i = rec.i; i >= T.i0 && M[i].t >= rec.t - c.settleRelevelSec; i--) if (M[i].flag === 'low') { t.unshift(M[i].t); z.unshift(M[i].z); }
+    if (t.length < (0.6 * c.settleRelevelSec) / c.binSec) return false;
+    const f = robustSlope(t, z, 0, t.length, { sigmaFloor: this.sigmaFloor });
+    if (!f || f.sigma > 1.5 * c.stepKg || f.slope * 60 < -c.flowOffKgMin || f.slope > this.qMax) return false;
+    return f.intercept + f.slope * (rec.t - f.tm) >= T.before - c.relevelMaxKg;
+  }
+
+  /**
+   * Decide what the touch under way was. back: the level the readings came back to
+   * (null: not seen coming back - the display was out of view meanwhile, or the
+   * recording ends); steady: a steady level held for relevelSec (steadyLevel).
+   */
+  closeTouch(rec, back, steady = false) {
+    const S = this.sess, c = this.cfg, T = S.touch, M = S.meas;
+    S.touch = null;
+    const lows = [];
+    for (let i = T.i0; i < M.length && M[i].t <= T.last; i++) if (M[i].flag === 'low') lows.push(M[i]);
+    const tail = median(lows.filter((r) => r.t >= T.last - 5).map((r) => r.z));
+    let weight = steady;
+    // (back above the floor but not at the old level: never lifted off anything - the floor
+    // came down to them)
+    if (steady) { /* judged */ } else if (back != null) weight = back < T.ref - c.rampKg || back - tail <= c.rampKg;
+    else {
+      // (steady once settled: the tube coming out of the metal can bounce the reading at first)
+      const zs = lows.filter((r) => r.t >= T.last - 10).map((r) => r.z).sort((a, b) => a - b);
+      const q = (p) => zs[Math.min(zs.length - 1, Math.floor(p * zs.length))];
+      weight = T.ref - tail <= c.relevelMaxKg && q(0.9) - q(0.1) <= 3 * c.stepKg;
+    }
+    if (weight) { this.relevel(rec, T, lows, back == null); return; }
+    if (!T.reported || (rec == null && back == null)) return; // (still under way when the recording ends: not counted)
+    const end = back != null ? T.back.t : T.last + c.binSec;
+    const dur = T.dur + (end - T.last);
+    S.touchCount++; S.touchTime += dur;
+    this.event('touch-end', { dur: r1(dur), depth: Math.round(T.depth) }, end);
+  }
+
+  /**
+   * The readings taken for a touch were the weight: accept them (but for dips well
+   * below the ones around them), take back the touch, and restart the filter from them.
+   */
+  relevel(rec, T, lows, unseen = false) {
+    const S = this.sess, c = this.cfg;
+    if (T.reported) {
+      const k = S.events.findLastIndex((e) => e.type === 'touch' && e.t === r1(T.start));
+      if (k >= 0) S.events.splice(k, 1);
+    }
+    const kept = [];
+    for (const r of lows) {
+      const near = lows.filter((x) => Math.abs(x.t - r.t) <= 5).map((x) => x.z);
+      if (r.z >= median(near) - 2.5 * c.stepKg) { r.flag = 'ok'; kept.push(r); }
+    }
+    // (taken back if the readings jump back up to the old level: tryReinit)
+    S.relevelled = unseen && rec ? { T, kept, t: rec.t } : null;
+    // Just after the display was out of view: readings it came back with that were more
+    // than relevelMaxKg above the ones taken for a touch next weren't the weight (the
+    // metal going back to the pot is never that much).
+    const M = S.meas, i0 = T.i0, first = median(lows.filter((r) => r.t <= T.start + 10).map((r) => r.z));
+    let g = i0;
+    while (g > 0 && i0 - g < 40 && M[g].t - M[g - 1].t <= c.blindSec) g--;
+    if (g > 0 && M[g].t - M[g - 1].t > c.blindSec && T.start - M[g].t <= 10) {
+      for (let i = g; i < i0; i++) if ((M[i].flag === 'ok' || M[i].flag === 'slow') && M[i].z > first + c.relevelMaxKg) M[i].flag = 'high';
+    }
+    // (up to now: during a replay the readings after this one are judged again next)
+    this.rebuildAccepted(rec ? rec.t : Infinity);
+    if (rec) this.restartFilter(rec);
+    this.event('relevel', { drop: Math.round(T.ref - median(lows.map((r) => r.z))) }, T.start);
+  }
+
+  // A level taken for the weight was a touch after all (the readings jumped back up when
+  // the crucible was lifted): its readings, and those accepted since, rejected again,
+  // and the touch counted. up: the first reading back up.
+  untouch(L, up) {
+    const S = this.sess, c = this.cfg, T = L.T;
+    let dur = T.dur, last = T.last;
+    for (const r of S.meas) {
+      if (r.t < T.start || r.t >= up.t) continue;
+      if (r.flag === 'ok' || r.flag === 'slow') r.flag = 'low';
+      if (r.t > last) { dur += r.t - last <= c.touchGapSec ? r.t - last : c.binSec; last = r.t; }
+    }
+    dur += Math.min(c.touchGapSec, up.t - last);
+    this.rebuildAccepted(up.t - 1e-6);
+    S.relevelled = null;
+    const k = S.events.findLastIndex((e) => e.type === 'relevel' && e.t === r1(T.start));
+    if (k >= 0) S.events.splice(k, 1);
+    const end = up.t;
+    S.touchCount++; S.touchTime += dur;
+    this.event('touch', {}, T.start);
+    this.event('touch-end', { dur: r1(dur), depth: Math.round(Math.max(T.depth, T.ref - median(L.kept.map((r) => r.z)))) }, end);
+  }
+
+  // the filter from the accepted readings of the last 15 s (a robust line through them)
+  restartFilter(rec) {
+    const S = this.sess, A = S.acc, R = S.R;
+    const i0 = lowerBound(A.t, rec.t - 15);
+    if (A.t.length - i0 < 4) return;
+    const f = robustSlope(A.t, A.z, i0, A.t.length, { sigmaFloor: this.sigmaFloor });
+    if (!f) return;
+    const m = f.intercept + f.slope * (rec.t - f.tm);
+    const q = Math.min(this.qMax, Math.max(0, f.slope));
+    S.kf.init(rec.t, m, q, Math.max((4 * R) / (A.t.length - i0), 100), Math.max(f.se * f.se, 0.25));
+    S.floorM = m; S.floorP = S.kf.Pmm; S.floorT = rec.t;
+    S.highRun = 0; S.slowHist = [];
+    rec.m = m; rec.q = q; rec.qsd = Math.sqrt(S.kf.Pqq);
   }
 
   tryReinit(kind, rec) {
@@ -331,19 +521,27 @@ export class TapEngine {
     const t = pts.map((p) => p.t), z = pts.map((p) => p.z);
     const f = robustSlope(t, z, 0, t.length, { sigmaFloor: this.sigmaFloor });
     if (!f) return false;
+    let touched = null;
     if (kind === 'high') {
       // reachable from the last reading the filter accepted (not from the filter itself,
       // which may be what went wrong)
       const A = S.acc, k = A.t.length - 1;
       const refT = k >= 0 ? A.t[k] : S.floorT, refZ = k >= 0 ? A.z[k] : S.floorM;
       const reach = this.qMax * Math.max(0, pts[0].t - refT) + 4 * Math.sqrt(R + S.floorP) + c.stepKg;
-      if (pts[0].z - refZ > reach) return false;                  // physically impossible jump
       if (f.sigma > 3 * Math.sqrt(R) + c.stepKg) return false;     // readings not self-consistent
+      if (pts[0].z - refZ > reach) {
+        // a jump back up to the level before a lower one taken for the weight (relevel):
+        // that was a touch after all - the crucible lifted off what it rested on
+        const L = S.relevelled, T = L?.T;
+        if (!T || pts[0].z < T.ref - c.rampKg || pts[0].z - T.ref > this.qMax * (pts[0].t - T.start) + 4 * Math.sqrt(R + S.floorP) + c.stepKg) return false;
+        touched = L;
+      }
     }
     const m = f.intercept + f.slope * (rec.t - f.tm);
     const q = Math.min(this.qMax, Math.max(0, f.slope));
     S.kf.init(rec.t, m, q, Math.max((4 * R) / pts.length, 100), Math.max(f.se * f.se, 0.25));
     S.floorM = m; S.floorP = S.kf.Pmm; S.floorT = rec.t;
+    if (touched) this.untouch(touched, pts[0]);
     if (kind === 'high') {
       for (const p of pts) { p.flag = 'ok'; S.acc.t.push(p.t); S.acc.z.push(p.z); }
     }
@@ -444,7 +642,12 @@ export class TapEngine {
     S.floorM = a; S.floorP = S.R; S.floorT = onset;
     S.lowRun = 0; S.highRun = 0; S.slowHist = []; S.touch = null;
     S.mainState = 'ok';
-    // replay the measurements since the onset through the filter
+    // replay the measurements since the onset through the filter (what it judged there
+    // before is judged again: not counted twice)
+    const again = (e) => e.t > r1(onset) && (e.type === 'touch' || e.type === 'touch-end' || e.type === 'reinit' || e.type === 'relevel');
+    for (const e of S.events) if (again(e) && e.type === 'touch-end') { S.touchCount--; S.touchTime -= e.dur; }
+    S.events = S.events.filter((e) => !again(e));
+    S.relevelled = null;
     this.rebuildAccepted(onset);
     this.replaying = true;
     for (const rec of S.meas) if (rec.t > onset) this.kfProcess(rec);
@@ -506,6 +709,7 @@ export class TapEngine {
   endSession(reason = 'manual', endT = this.lastT) {
     const S = this.sess;
     if (!S) return null;
+    if (S.touch) this.closeTouch(null, S.touch.back ? median(S.touch.back.z) : null);
     if (S.flowing) this.flowStop(Math.max(S.segOnset, endT - S.T0));
     S.endT = endT - S.T0;
     this.event('end', { reason }, S.endT);
