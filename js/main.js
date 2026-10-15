@@ -18,7 +18,7 @@ import { DigitMemory, lessonsOf, mergeLooks } from './vision/learn.js';
 import { SEED_LOOKS, SEED_ABOUT } from './vision/seed-looks.js';
 import { TeachPolicy, TeachStore, TEACH_DEFAULTS, teachRect, viewPicture, readingOf, nextBatch, staleRecords, batchFiles, batchPath, batchSummary, teachUsage, teachToDrop, GitHubSink, parseRepo } from './teach.js';
 
-export const VERSION = '0.8.0';
+export const VERSION = '0.8.1';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
