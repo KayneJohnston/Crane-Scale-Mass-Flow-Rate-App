@@ -18,7 +18,7 @@ import { DigitMemory, lessonsOf, mergeLooks } from './vision/learn.js';
 import { SEED_LOOKS, SEED_ABOUT } from './vision/seed-looks.js';
 import { TeachPolicy, TeachStore, TEACH_DEFAULTS, teachRect, viewPicture, readingOf, nextBatch, staleRecords, batchFiles, batchPath, batchSummary, teachUsage, teachToDrop, GitHubSink, parseRepo } from './teach.js';
 
-export const VERSION = '0.8.1';
+export const VERSION = '0.8.2';
 
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a, b) => (x < a ? a : x > b ? b : x);
@@ -550,20 +550,24 @@ function collectCrop(res, el, w, h, T, wall) {
   if (kind) keepCrop(res, kind, el, w, h, T, wall);
 }
 
-// Copy the display out of the frame now, store it when encoded. label: what the person
-// said it showed (learnt: what the reader learned from that, learn.js). Resolves to the
-// crop's id, or null.
-function keepCrop(res, kind, el, w, h, T, wall, label = null, learnt = null) {
+// Copy the display out of the frame now, store it when encoded. Resolves to the crop's
+// id, or null.
+function keepCrop(res, kind, el, w, h, T, wall) {
   const rect = res?.located ? cropRect(res.located, w, h) : null;
   if (!rect) return Promise.resolve(null);
-  const cv = document.createElement('canvas');
-  cv.width = rect.outW; cv.height = rect.outH;
-  const ctx = cv.getContext('2d');
-  ctx.imageSmoothingEnabled = true;
-  ctx.imageSmoothingQuality = 'high';
-  ctx.drawImage(el, rect.x, rect.y, rect.w, rect.h, 0, 0, rect.outW, rect.outH);
-  const meta = cropRecord(res, kind, { t: T, wall, source: app.source, rect });
-  if (label != null) { meta.label = label; meta.labelledAt = wall; meta.learnt = learnt; }
+  return storeCrop(grab(el, rect), cropRecord(res, kind, { t: T, wall, source: app.source, rect }));
+}
+
+// The picture a question was answered about (snapDisplay), with the answer: label, what
+// the person said it showed (learnt: what the reader learned from that, learn.js).
+function keepSnap(s, kind, label, learnt = null) {
+  const meta = cropRecord(s.res, kind, { t: s.T, wall: s.wall, source: 'camera', rect: s.rect });
+  Object.assign(meta, { label, labelledAt: Date.now(), learnt });
+  return storeCrop(s.cv, meta);
+}
+
+function storeCrop(cv, meta) {
+  const label = meta.label;
   return new Promise((resolve) => cv.toBlob(async (blob) => {
     if (!blob) { resolve(null); return; }
     try {
@@ -930,10 +934,12 @@ function flushTeachLog() {
   teachStore.add({ type: 'log', id: `${teach.session}-L${L.wall0.toString(36)}`, wall0: L.wall0, wall1: L.rows.at(-1)[0], rows: L.rows }).catch((e) => console.warn(e));
 }
 
-// what the person said the display showed (taken back with Undo)
+// what the person said the display showed at T, wall (the picture they answered about),
+// taken back with Undo; said: when they answered (ms)
 function teachAnswer(T, wall, value, corrected, kind) {
   if (!settings.teachMode || app.source !== 'camera') return null;
-  const rec = { type: 'answer', id: `${teach.session}-A${wall.toString(36)}`, wall, t: +T.toFixed(3), value, corrected, kind };
+  const said = Date.now();
+  const rec = { type: 'answer', id: `${teach.session}-A${said.toString(36)}`, wall, t: +T.toFixed(3), value, corrected, kind, said };
   teachStore.add(rec).catch(() => {});
   return rec;
 }
@@ -1169,9 +1175,9 @@ function forgetGitHubSetup() {
 // ------------------------------------- asking what the display shows --
 
 // The question card (ask.js). open: {kind: 'ask' (the reader can't tell) | 'correct' (the
-// person opened it with ✎), res: the reading it was opened on, choices, stage: 'choose' |
-// 'other' | 'done', opened: when it appeared (ms), step: the value in "Other value",
-// timer, undo, cropId}
+// person opened it with ✎), res: the reading it was opened on, snap: the picture of the
+// display then (snapDisplay), choices, stage: 'choose' | 'other' | 'done', opened: when
+// it appeared (ms), step: the value in "Other value", timer, undo, cropId}
 const asking = { open: null };
 const nowSec = () => performance.now() / 1000; // the clock of the camera frames
 
@@ -1197,8 +1203,11 @@ function openAsk(kind, res) {
   if (!choices.length && kind === 'ask') return;
   if (asking.open) clearTimeout(asking.open.timer);
   const mid = Math.round((+settings.minKg + +settings.maxKg) / 2 / step) * step;
-  const q = { kind, res, choices, stage: 'choose', opened: performance.now(), step: choices[Math.floor(choices.length / 2)] ?? app.engine?.lastValue ?? mid };
+  const q = { kind, res, snap: snapDisplay(res), choices, stage: 'choose', opened: performance.now(), step: choices[Math.floor(choices.length / 2)] ?? app.engine?.lastValue ?? mid };
   asking.open = q;
+  $('askPic').replaceChildren(...(q.snap ? [q.snap.cv] : []));
+  $('askPic').hidden = !q.snap;
+  $('askTitle').textContent = q.snap ? 'What does the picture show?' : 'What does the display show?';
   const sub = $('askSub');
   sub.hidden = kind !== 'correct';
   sub.textContent = kind !== 'correct' ? '' : res?.ok ? `The app reads ${res.how === 'prior' ? '≈' : ''}${fmtInt(res.value)}` : 'The app can’t read it';
@@ -1227,10 +1236,22 @@ function openAsk(kind, res) {
   syncCorrectButton();
 }
 
+// The display as the question appears, from the camera: the person answers about this
+// picture - the display may show another value by the time they tap - and it is kept
+// with their answer. {cv: the picture, rect, res, T, wall}, or null.
+function snapDisplay(res) {
+  const w = video.videoWidth, h = video.videoHeight;
+  const rect = app.source === 'camera' && res?.located && w && h ? cropRect(res.located, w, h) : null;
+  return rect ? { cv: grab(video, rect), rect, res, T: nowSec(), wall: Date.now() } : null;
+}
+
 function showAskStage(stage) {
   const q = asking.open;
   if (!q) return;
   q.stage = stage;
+  // the picture: under the question (or the value being set), above the answer
+  const el = $({ choose: 'askChoose', other: 'askOther', done: 'askDone' }[stage]);
+  el.insertBefore($('askPic'), stage === 'done' ? el.firstChild : el.children[1]);
   $('askChoose').hidden = stage !== 'choose';
   $('askOther').hidden = stage !== 'other';
   $('askDone').hidden = stage !== 'done';
@@ -1267,6 +1288,7 @@ function closeAsk() {
   clearTimeout(q.timer);
   asking.open = null;
   $('askCard').hidden = true;
+  $('askPic').replaceChildren();
   syncCorrectButton();
   renderLive(true);
 }
@@ -1280,22 +1302,25 @@ function syncCorrectButton() {
 // a tap in the first moment after the card appeared was meant for something else
 const askGuarded = () => !asking.open || performance.now() - asking.open.opened < ASK_DEFAULTS.guardMs;
 
+// The answer is what the picture showed, when it was taken (without a picture: the
+// display now).
 function answerAsk(v) {
   const q = asking.open;
   if (askGuarded() || q.stage === 'done') return;
-  const T = nowSec(), wall = Date.now(), res = app.lastRes;
+  const T = nowSec(), wall = Date.now(), s = q.snap;
   const corrected = q.kind === 'correct' && q.res?.ok && q.res.value !== v ? q.res.value : null;
-  q.undo = reader.tell(T, v, readerConfig(settings), corrected);
+  q.undo = reader.tell(s ? s.T : T, v, readerConfig(settings), corrected);
   // ... and learns what the digits it was not sure of (or got wrong) look like
-  q.learnt = learnFrom(res, v);
+  q.learnt = s ? learnFrom(s.res, v) : null;
   saveMemory();
-  q.teachAnswer = teachAnswer(T, wall, v, corrected, q.kind);
+  q.teachAnswer = s ? teachAnswer(s.T, s.wall, v, corrected, q.kind) : teachAnswer(T, wall, v, corrected, q.kind);
+  // (the tap's readings are in time order: one more now)
   app.engine?.pushFrame(T, wall, v, 1, 'told');
   askPolicy.answered(T);
   q.cropId = null; q.undone = false;
-  const keep = settings.collectCrops && !review.full && res?.located && app.source === 'camera';
+  const keep = settings.collectCrops && !review.full && !!s;
   if (keep) {
-    keepCrop(res, q.kind === 'correct' ? 'corrected' : 'asked', video, video.videoWidth, video.videoHeight, T, wall, v, q.learnt).then((id) => {
+    keepSnap(s, q.kind === 'correct' ? 'corrected' : 'asked', v, q.learnt).then((id) => {
       if (!id) return;
       if (q.undone) crops.delete(id).then(() => { review.count.total--; updateReviewBadge(); }).catch(() => {});
       else q.cropId = id;
@@ -1328,9 +1353,8 @@ function cantTell() {
   const q = asking.open;
   if (askGuarded()) return;
   if (q.kind === 'ask') {
-    const T = nowSec(), wall = Date.now(), res = app.lastRes;
-    askPolicy.notNow(T);
-    if (settings.collectCrops && !review.full && res?.located) keepCrop(res, 'asked', video, video.videoWidth, video.videoHeight, T, wall, 'unreadable');
+    askPolicy.notNow(nowSec());
+    if (settings.collectCrops && !review.full && q.snap) keepSnap(q.snap, 'asked', 'unreadable');
     toast('OK. No questions for a minute');
   }
   closeAsk();
@@ -1343,14 +1367,15 @@ function notNowAsk() {
   closeAsk();
 }
 
-// "Other value": starts from what the app expects now (the display may have moved on
-// since the question appeared)
+// "Other value": starts from what the app made of the picture (without one: of the
+// display now)
 function startOther() {
   const q = asking.open;
   if (askGuarded()) return;
   const step = +settings.stepKg || 50;
-  const now = app.lastRes?.ok ? app.lastRes.value : app.lastRes?.pred?.value;
-  if (now != null) q.step = Math.round(now / step) * step;
+  const r = q.snap ? q.res : app.lastRes;
+  const v = r?.ok ? r.value : r?.pred?.value;
+  if (v != null) q.step = Math.round(v / step) * step;
   showAskStage('other');
 }
 
@@ -2192,7 +2217,7 @@ async function init() {
   }
   const p = new URLSearchParams(location.search);
   if (p.has('demo')) startDemo(+p.get('demo') || 5, +p.get('seed') || 0);
-  window.__tapRate = { app, settings: () => settings, store, crops, memory, teachStore, teach }; // for debugging / automated tests
+  window.__tapRate = { app, settings: () => settings, store, crops, memory, teachStore, teach, asking }; // for debugging / automated tests
 }
 
 init();

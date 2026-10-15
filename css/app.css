@@ -245,6 +245,9 @@ table.stats td:last-child { text-align: right; font-weight: 600; }
   display: grid; place-items: center; padding: 0; flex-shrink: 0; cursor: pointer;
 }
 .ask-back { margin: -8px 0 -8px -10px; color: var(--blue); }
+.ask-pic { flex-shrink: 0; height: 60px; background: #000; border-radius: 10px; overflow: hidden; display: flex; justify-content: center; }
+.ask-pic canvas { display: block; height: 100%; width: auto; max-width: 100%; object-fit: contain; }
+.ask-done .ask-pic { align-self: stretch; }
 .ask-answers { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
 .ask-answers button, .ask-steps button {
   height: 54px; border-radius: 12px; border: 1px solid var(--line); background: var(--card2); color: var(--text);

@@ -2,9 +2,11 @@
 // Chromium. The camera is a canvas stream of a simulated display whose middle digit is
 // half hidden for 10 s of every 16 (as by fumes), so the reader can't tell.
 //   node tests/e2e/ask.mjs [outDir]
-// Checks: the question appears after ~3 s without a value, with three values and the
-// differing digit marked; the right answer counts as a reading and its picture goes to
-// Review labelled; ✎ corrects a reading; "Not now" keeps it quiet; no runtime errors.
+// Checks: the question appears after ~3 s without a value, with a picture of the display
+// then and three values, the differing digit marked; the answer about the picture -
+// given after the display has moved on, as it does while metal pours - counts as a
+// reading, and that picture goes to Review labelled with it; ✎ corrects a reading;
+// "Not now" keeps it quiet; no runtime errors.
 import { createRequire } from 'node:module';
 import { mkdirSync } from 'node:fs';
 import { serve } from '../../tools/serve.mjs';
@@ -33,11 +35,15 @@ await page.addInitScript(() => {
     const c2 = cv.getContext('2d');
     const img = c2.createImageData(W, H);
     const t0 = performance.now();
+    // what the display shows from when ([s, kg], on the app's clock); __hard: the test
+    // keeps the digit hidden, __hold: it stops the steps, __extra: it moves the display on
+    window.__log = [];
     const draw = () => {
       const t = (performance.now() - t0) / 1000;
-      const hard = t % 16 > 6;
+      const hard = window.__hard ?? t % 16 > 6;
       const cx = W / 2 + 20 * Math.sin(t * 0.7);
-      window.__shown = 18000 + 50 * Math.floor(t / 6);
+      window.__shown = (window.__hold ?? 18000 + 50 * Math.floor(t / 6)) + (window.__extra || 0);
+      if (window.__log.at(-1)?.[1] !== window.__shown) window.__log.push([performance.now() / 1000, window.__shown]);
       renderDisplay(img.data, W, H, { text: String(window.__shown), digitH: 34, cx, cy: H / 2, slantDeg: 7, noise: 3, glow: 0.35, seed: Math.floor(t * 10) + 1 });
       c2.putImageData(img, 0, 0);
       if (hard) { c2.fillStyle = 'rgb(26,22,24)'; c2.fillRect(cx - 14, H / 2 + 1, 26, 18); }
@@ -58,6 +64,7 @@ await page.goto(base);
 await page.click('#btnCamera');
 const tStart = Date.now();
 await page.waitForSelector('#askCard:not([hidden])', { timeout: 25000 });
+await page.evaluate(() => { window.__hard = true; window.__hold = window.__shown; }); // (until answered)
 const waited = (Date.now() - tStart) / 1000;
 console.log(`   asked after ${waited.toFixed(1)} s (display unclear from 6 s)`);
 check(waited > 8 && waited < 13, 'asks about 3 s after the display became unclear');
@@ -72,9 +79,19 @@ const differ = [...Array(n).keys()].filter((i) => digits.some((d) => d.padStart(
 check(answers.length === 3 && (differ <= 2 ? marked >= 3 : marked === 0), `three values offered, ${differ <= 2 ? 'the differing digit marked' : 'too many digits differ to mark'}`);
 check(/asking you/.test(await page.textContent('#readingBadge')), 'the reading says it is asking');
 
-// answer what the display shows (from the offered values, else with Other value)
-await page.waitForTimeout(400);
-const truth = await shown();
+// The card shows the display as it was when the question appeared, and the question is
+// about that picture. The display moves on before the tap (by 50 kg, as while metal
+// pours): the answer is still what the picture showed.
+const pic = await page.evaluate(() => {
+  const s = window.__tapRate.asking.open?.snap, cv = document.querySelector('#askPic canvas');
+  return { T: s?.T, w: cv?.width, h: cv?.height, shown: cv?.getBoundingClientRect().width || 0, title: document.getElementById('askTitle').textContent };
+});
+check(pic.T != null && pic.shown > 50 && /picture/.test(pic.title), `the card shows a picture of the display (${pic.w}x${pic.h}, "${pic.title}")`);
+// (what the display showed a moment before the picture: the camera's frames lag a little)
+const truth = await page.evaluate((T) => window.__log.filter((x) => x[0] <= T - 0.1).at(-1)[1], pic.T);
+const tMoved = await page.evaluate(() => { window.__extra = 50; return performance.now() / 1000; });
+await page.waitForTimeout(800);
+console.log(`   the picture shows ${fmt(truth)}, the display now ${fmt(await shown())}`);
 const k = answers.indexOf(fmt(truth));
 if (k >= 0) await (await page.$$('#askAnswers button'))[k].click();
 else {
@@ -95,9 +112,12 @@ const told = await page.evaluate(() => {
   return [...(e.sess?.raw || []), ...(e.rawBuf || [])].filter((r) => r[3] === 'told').map((r) => r[1]);
 });
 check(told.includes(truth), `the answer counted as a reading (${told.join(', ')})`);
-const asked = await page.evaluate(async () => (await window.__tapRate.crops.list()).filter((c) => c.kind === 'asked').map((c) => c.label));
-check(asked.includes(truth), `its picture is in Review, labelled (${asked.join(', ')})`);
+const asked = await page.evaluate(async () => (await window.__tapRate.crops.list()).filter((c) => c.kind === 'asked'));
+check(asked.length === 1 && asked[0].label === truth, `its picture is in Review, labelled (${asked.map((c) => c.label).join(', ')})`);
+check(asked.length === 1 && Math.abs(asked[0].t - pic.T) < 0.002 && asked[0].t < tMoved && asked[0].w === pic.w && asked[0].h === pic.h,
+  `the picture kept is the one the card showed, from before the display moved on (${asked[0]?.t} < ${tMoved.toFixed(3)})`);
 await page.waitForSelector('#askCard', { state: 'hidden', timeout: 8000 });
+await page.evaluate(() => { window.__hard = undefined; });
 
 // correcting a reading with the pencil
 await page.click('#btnCorrect');

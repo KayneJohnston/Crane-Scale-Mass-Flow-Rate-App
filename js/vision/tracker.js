@@ -236,11 +236,14 @@ export class DisplayTracker {
   /**
    * A value the person read off the display at time t: asked while the frames were
    * unclear, or correcting the app's reading (corrected). Taken like a clear reading -
-   * the history starts afresh from it if it is far from the prediction. Returns what
-   * undoTold() needs to take it back.
+   * the history starts afresh from it if it is far from the prediction. t may be a few
+   * seconds ago (they answered about a picture of that moment); readings are taken in
+   * time order, so it goes after any accepted since. Returns what undoTold() needs to
+   * take it back.
    */
   told(t, v, cfg = {}, corrected = null) {
     const c = { ...TRACK_DEFAULTS, ...cfg };
+    if (this.hist.length) t = Math.max(t, this.hist[this.hist.length - 1].t);
     const undo = { t, hist: this.hist.slice(), lastClear: this.lastClear, lastClearV: this.lastClearV, toldV: this.toldV };
     const p = this.ownPredict(t, c);
     this.pending = null;
@@ -254,7 +257,7 @@ export class DisplayTracker {
   /** Take back a value told (a mistaken tap); readings accepted since are kept. */
   undoTold(u) {
     if (!u || !this.toldV || this.toldV.t !== u.t) return;
-    this.hist = [...u.hist.filter((h) => h.t < u.t), ...this.hist.filter((h) => h.t > u.t)];
+    this.hist = [...u.hist.filter((h) => h.t <= u.t), ...this.hist.filter((h) => h.t > u.t)];
     if (this.lastClear === u.t) { this.lastClear = u.lastClear; this.lastClearV = u.lastClearV; }
     this.toldV = u.toldV;
   }

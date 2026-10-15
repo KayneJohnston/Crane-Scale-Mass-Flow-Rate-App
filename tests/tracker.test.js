@@ -404,6 +404,29 @@ test('a reading the person corrected is refused until the display shows another 
   assert.equal(tr4.vetoOf(62, { ...TRACK_DEFAULTS, ...CFG }), null);
 });
 
+test('an answer about a picture of a moment ago counts from that moment, after the readings since', () => {
+  const C = { ...TRACK_DEFAULTS, ...CFG };
+  // no readings since the picture: from its time - the display may have changed since
+  const now = locked(0, 20050), ago = locked(0, 20050);
+  now.told(4.0, 20100, CFG);
+  ago.told(1.5, 20100, CFG);
+  assert.ok(ago.holdOf(4.0, C).told);
+  assert.ok(ago.holdOf(4.0, C).q > 10 * now.holdOf(4.0, C).q, `${ago.holdOf(4.0, C).q} ${now.holdOf(4.0, C).q}`);
+  assert.equal(ago.holdOf(8.0, C), null); // toldSec after the picture
+  assert.ok(now.holdOf(8.0, C)?.told);
+  // readings accepted since the picture: it goes after them, in time order
+  const tr = locked(0, 20050);
+  for (let i = 12; i <= 20; i++) tr.decide(i * 0.1, [clear(20050)], CFG);
+  const last = tr.hist.at(-1).t, n = tr.hist.length;
+  const u = tr.told(1.5, 20100, CFG);
+  assert.ok(tr.hist.every((h, i) => i === 0 || h.t >= tr.hist[i - 1].t));
+  assert.deepEqual(tr.hist.at(-1), { t: last, v: 20100 });
+  // ... and Undo leaves them as they were
+  tr.undoTold(u);
+  assert.equal(tr.hist.length, n);
+  assert.ok(tr.hist.every((h) => h.v === 20050) && tr.hist.at(-1).t === last);
+});
+
 test('a mistaken answer can be taken back', () => {
   const C = { ...TRACK_DEFAULTS, ...CFG };
   const tr = locked(0, 20050);
